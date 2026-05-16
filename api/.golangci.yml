@@ -1,0 +1,30 @@
+run:
+  timeout: 5m
+  go: "1.22"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gofmt
+    - goimports
+    - gosec
+    - revive
+
+linters-settings:
+  gosec:
+    excludes:
+      - G304 # opening user-supplied paths is required for SQLite stores in tests
+      - G404 # tests use math/rand for fixture entropy
+  revive:
+    rules:
+      - name: exported
+        disabled: false
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters: [gosec, errcheck]
