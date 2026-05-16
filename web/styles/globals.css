@@ -1,0 +1,68 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------
+   Owera Agentic — design tokens
+   Operator UI. Dense, monospace-flavoured, table-heavy.
+   Single accent. No gradients. No drop shadows on cards.
+---------------------------------------------------------------- */
+
+@theme {
+  --color-background: #0a0a0b;
+  --color-foreground: #e6e6e8;
+  --color-muted: #16161a;
+  --color-muted-foreground: #8a8a93;
+  --color-card: #111114;
+  --color-card-foreground: #e6e6e8;
+  --color-border: #23232a;
+  --color-input: #16161a;
+  --color-ring: #5b8def;
+
+  /* Owera primary — a restrained electric blue. One accent only. */
+  --color-primary: #5b8def;
+  --color-primary-foreground: #ffffff;
+
+  /* Job state palette (matches lib/types.ts state colors). */
+  --color-state-submitted: #64748b; /* slate-500 */
+  --color-state-queued:    #3b82f6; /* blue-500 */
+  --color-state-running:   #f59e0b; /* amber-500 */
+  --color-state-succeeded: #10b981; /* emerald-500 */
+  --color-state-failed:    #ef4444; /* red-500 */
+  --color-state-cancelled: #71717a; /* zinc-500 */
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+}
+
+/* Base reset + body chrome. */
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html,
+  body {
+    background: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    -webkit-font-smoothing: antialiased;
+  }
+
+  * {
+    border-color: var(--color-border);
+  }
+
+  /* Operator UI: tabular numbers everywhere, by default. */
+  body {
+    font-variant-numeric: tabular-nums;
+  }
+
+  code, pre, kbd, samp {
+    font-family: var(--font-mono);
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+}
