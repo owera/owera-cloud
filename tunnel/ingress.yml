@@ -1,0 +1,24 @@
+# Ingress-only fragment, identical in shape to the `ingress:` block of
+# config.example.yml. Some operators prefer to keep ingress in its own
+# file and reference it from config.yml; this fragment is kept in sync
+# with the inline copy so either deployment style works.
+#
+# Source of truth for the cloud-plane description of these rules is
+# ../infra/tunnel.cloudflare.yaml. Changes flow:
+#
+#   infra/tunnel.cloudflare.yaml  --(operator copies)-->  tunnel/ingress.yml
+#                                                            |
+#                                  --(reconciled into)-->  tunnel/config.example.yml
+#                                                            |
+#                                  --(installed at)-->  /usr/local/etc/cloudflared/config.yml
+
+ingress:
+  - hostname: internal-rpc.owera.ai
+    service: http://localhost:9091
+    originRequest:
+      noTLSVerify: true
+      connectTimeout: 10s
+      tlsTimeout: 10s
+      keepAliveConnections: 16
+      keepAliveTimeout: 90s
+  - service: http_status:404

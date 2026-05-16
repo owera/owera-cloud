@@ -1,0 +1,101 @@
+# Declarative DNS for owera.ai — managed in Cloudflare.
+#
+# This file is the source of truth that operators reconcile against the
+# live Cloudflare zone with `fleetctl dns sync` (TODO: implement). Until
+# then, treat it as documentation: any change here must be mirrored in
+# the Cloudflare dashboard, and any change in the dashboard must be
+# back-ported here in the same commit.
+#
+# All proxied (orange-cloud) records get Cloudflare's TLS, WAF, and DDoS
+# protection. The tunnel-backed CNAMEs MUST stay proxied — cloudflared
+# only routes traffic that hits Cloudflare's edge.
+
+zone: owera.ai
+
+records:
+  # ----- Public API (Fly.io) ----------------------------------------
+  - name: api.owera.ai
+    type: CNAME
+    value: owera-agentic-api.fly.dev
+    proxied: true
+    ttl: auto
+    comment: "Public API edge; backed by Fly app owera-agentic-api (region gru)"
+
+  # ----- Customer dashboard (Vercel) --------------------------------
+  - name: app.owera.ai
+    type: CNAME
+    value: cname.vercel-dns.com
+    proxied: false  # Vercel manages its own TLS; do not double-proxy
+    ttl: 300
+    comment: "Customer dashboard; Vercel multi-region gru1+iad1"
+
+  # ----- Public status page (Vercel — separate project) -------------
+  - name: status.owera.ai
+    type: CNAME
+    value: cname.vercel-dns.com
+    proxied: false
+    ttl: 300
+    comment: "Public status page; consumes api.owera.ai/internal/status"
+
+  # ----- Operator-plane tunnel (Cloudflare Named Tunnel) ------------
+  - name: internal-rpc.owera.ai
+    type: CNAME
+    value: "{{REFERENCE:cloudflare.tunnel.owera-operator-plane.cname}}"
+    proxied: true
+    ttl: auto
+    comment: "Tunnelled to Mac mini gateway localhost:9091; see tunnel.cloudflare.yaml"
+
+  # ----- Apex + www -------------------------------------------------
+  - name: owera.ai
+    type: A
+    value: "192.0.2.1"  # Cloudflare placeholder — replaced by Vercel anycast IPs at apply time
+    proxied: true
+    ttl: auto
+    comment: "Apex; redirects to app.owera.ai via Cloudflare Page Rule"
+
+  - name: www.owera.ai
+    type: CNAME
+    value: owera.ai
+    proxied: true
+    ttl: auto
+
+  # ----- Mail (SES) -------------------------------------------------
+  - name: owera.ai
+    type: MX
+    priority: 10
+    value: "{{REFERENCE:ses.mx.host}}"
+    ttl: 3600
+    comment: "Transactional email via Amazon SES; see secrets-manifest.md"
+
+  - name: _dmarc.owera.ai
+    type: TXT
+    value: "v=DMARC1; p=quarantine; rua=mailto:dmarc@owera.ai; ruf=mailto:dmarc@owera.ai; fo=1"
+    ttl: 3600
+
+  - name: owera.ai
+    type: TXT
+    value: "v=spf1 include:amazonses.com -all"
+    ttl: 3600
+
+  # ----- CAA (restrict cert issuance) -------------------------------
+  - name: owera.ai
+    type: CAA
+    flags: 0
+    tag: issue
+    value: "letsencrypt.org"
+    ttl: 3600
+
+  - name: owera.ai
+    type: CAA
+    flags: 0
+    tag: issue
+    value: "pki.goog"
+    ttl: 3600
+
+  - name: owera.ai
+    type: CAA
+    flags: 0
+    tag: issuewild
+    value: ";"
+    ttl: 3600
+    comment: "No wildcard certs issued for owera.ai"

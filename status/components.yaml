@@ -1,0 +1,111 @@
+# Declarative spec of components monitored by status.owera.ai.
+#
+# Consumed by the public status page (Next.js, lands in a follow-on PR) and
+# by the operator-plane uptime aggregator. The page derives historical
+# uptime from api.owera.ai/internal/status, which itself aggregates from
+# the operator plane.
+#
+# Each component has an SLA target. SLAs are the contractual commitment;
+# SLOs (internal targets) are tighter and tracked separately.
+
+components:
+  - id: public-api
+    name: "Public API"
+    description: "api.owera.ai — the Go service in api/ on Fly.io"
+    probe:
+      type: http
+      url: "https://api.owera.ai/healthz"
+      expected_status: 200
+      timeout_ms: 5000
+      interval_s: 30
+    sla:
+      uptime_pct: 99.9      # 43m 49s downtime / month
+      latency_p95_ms: 500
+      window: monthly
+    public: true
+
+  - id: customer-dashboard
+    name: "Customer Dashboard"
+    description: "app.owera.ai — the Next.js web tier on Vercel"
+    probe:
+      type: http
+      url: "https://app.owera.ai/"
+      expected_status: 200
+      timeout_ms: 5000
+      interval_s: 60
+    sla:
+      uptime_pct: 99.9
+      latency_p95_ms: 2000  # First contentful paint budget; not server-only
+      window: monthly
+    public: true
+
+  - id: operator-plane-gateway
+    name: "Operator Plane Gateway"
+    description: "Mac mini gateway running the Hermes operator plane; reached via Cloudflare Named Tunnel"
+    probe:
+      type: http
+      url: "https://api.owera.ai/internal/operator-ping"
+      expected_status: 200
+      timeout_ms: 10000
+      interval_s: 60
+    sla:
+      uptime_pct: 99.5      # 3h 39m / month — tighter than typical home-office; relaxed vs. cloud tiers because of physical-environment risk
+      latency_p95_ms: 1000
+      window: monthly
+    public: true
+    notes: |
+      The operator plane sits on a Mac mini in São Paulo, BR. The 99.5%
+      SLA reflects the physical-environment risk (residential power, ISP).
+      Customers are warned in the contract that gateway-dependent operations
+      carry a slightly weaker SLA than the cloud-plane tiers.
+
+  - id: hermes-workers
+    name: "Hermes Worker Fleet"
+    description: "macOS worker nodes provisioned by the operator plane"
+    probe:
+      type: aggregate
+      source: "api.owera.ai/internal/status/workers"
+      healthy_threshold_pct: 67   # ≥67% of workers reporting healthy in the last 5min
+      interval_s: 60
+    sla:
+      uptime_pct: 99.0      # 7h 18m / month — fleet is intentionally heterogeneous; resilience is in the count, not each node
+      window: monthly
+    public: true
+
+  - id: tunnel
+    name: "Operator Plane Tunnel"
+    description: "Cloudflare Named Tunnel terminating on the gateway; carries internal-rpc.owera.ai"
+    probe:
+      type: http
+      url: "https://internal-rpc.owera.ai/healthz"
+      expected_status: 200
+      timeout_ms: 5000
+      interval_s: 60
+    sla:
+      uptime_pct: 99.9
+      latency_p95_ms: 500
+      window: monthly
+    public: false           # Internal-only; not surfaced on the public status page
+
+  - id: public-status
+    name: "Status Page"
+    description: "status.owera.ai itself"
+    probe:
+      type: http
+      url: "https://status.owera.ai/"
+      expected_status: 200
+      timeout_ms: 5000
+      interval_s: 120
+    sla:
+      uptime_pct: 99.95     # Status pages must outlive the thing they monitor; hosted on Vercel separately from the dashboard
+      window: monthly
+    public: true            # Recursive but useful — if the public status page is itself down, this is reported by the operator-plane uptime aggregator out-of-band
+
+# Component groups for the public status page layout.
+groups:
+  - id: customer-facing
+    name: "Customer-facing services"
+    members: [public-api, customer-dashboard, public-status]
+  - id: operator
+    name: "Operator plane"
+    members: [operator-plane-gateway, hermes-workers]

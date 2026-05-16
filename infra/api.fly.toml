@@ -1,0 +1,65 @@
+# Fly.io configuration for the Owera Agentic API service (api/).
+#
+# The Go service in api/ listens on :8080. Health check at /healthz.
+# Primary region gru (São Paulo) — Owera's BR primary. Secondary region
+# iad (US-East) is added when capacity demands it; for now we run gru-only
+# and rely on Vercel's gru1+iad1 for web-tier multi-region.
+#
+# Secrets (Stripe keys, operator-plane verification pubkey, etc.) are NEVER
+# checked in. They live in `fly secrets` — set them via `fly secrets set
+# KEY=VALUE -a owera-agentic-api`. See infra/secrets-manifest.md for the
+# authoritative catalogue.
+
+app           = "owera-agentic-api"
+primary_region = "gru"
+kill_signal   = "SIGINT"
+kill_timeout  = "30s"
+
+[build]
+  dockerfile = "../api/Dockerfile"
+
+[env]
+  PORT          = "8080"
+  CHK_INTERVAL  = "10s"
+  LOG_FORMAT    = "jsonl"
+  LOG_LEVEL     = "info"
+  # NEXT_PUBLIC_API_URL is set on the web tier; the API does not consume it.
+  # OPERATOR_RPC_URL points at the Cloudflare-tunnel-fronted operator plane;
+  # set via `fly secrets` so it isn't baked into the image.
+
+[http_service]
+  internal_port      = 8080
+  force_https        = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+  processes          = ["app"]
+
+  [http_service.concurrency]
+    type       = "requests"
+    soft_limit = 200
+    hard_limit = 250
+
+  [[http_service.checks]]
+    name              = "healthz"
+    method            = "GET"
+    path              = "/healthz"
+    interval          = "10s"
+    timeout           = "2s"
+    grace_period      = "10s"
+    protocol          = "http"
+
+[deploy]
+  strategy = "rolling"
+
+[[vm]]
+  size      = "shared-cpu-1x"
+  memory    = "512mb"
+  cpu_kind  = "shared"
+  cpus      = 1
+
+# Auto-scaling: 0 (scale-to-zero overnight) up to 4 instances under load.
+# Fly's autoscaler honours min_machines_running=0 and the soft_limit.
+[scaling]
+  min_machines_running = 0
+  max_machines_running = 4

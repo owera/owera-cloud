@@ -1,0 +1,38 @@
+# cloudflared runtime config for the operator-plane tunnel.
+#
+# Deployed to /usr/local/etc/cloudflared/config.yml on the Mac mini gateway
+# and loaded by the LaunchDaemon in service.example.plist.
+#
+# This file is the COPY-TO-DISK example. Replace {{REFERENCE}} placeholders
+# with real values during install (see ../tunnel/README.md):
+#
+#   tunnel:           the UUID returned by `cloudflared tunnel create`
+#   credentials-file: absolute path to <UUID>.json (chmod 600, owner _cloudflared)
+#
+# Do NOT commit the populated file. The placeholder version lives here as
+# documentation; the real config sits only on the gateway filesystem.
+
+tunnel: "{{REFERENCE:cloudflared.tunnel.owera-operator-plane.uuid}}"
+credentials-file: "/usr/local/etc/cloudflared/{{REFERENCE:cloudflared.tunnel.owera-operator-plane.uuid}}.json"
+
+# Ingress is sourced from ingress.yml — keep both in sync.
+# cloudflared resolves `ingress` from a sibling file if `include` is set.
+# We inline here so the daemon needs only one file.
+ingress:
+  - hostname: internal-rpc.owera.ai
+    service: http://localhost:9091
+    originRequest:
+      noTLSVerify: true
+      connectTimeout: 10s
+      tlsTimeout: 10s
+      keepAliveConnections: 16
+      keepAliveTimeout: 90s
+  - service: http_status:404
+
+metrics: 127.0.0.1:9300
+loglevel: info
+transport-loglevel: warn
+
+# Auto-update is disabled because we pin the cloudflared version via Homebrew
+# and roll forward in maintenance windows, not whenever Cloudflare ships.
+no-autoupdate: true

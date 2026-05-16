@@ -1,0 +1,45 @@
+# Cloudflare Named Tunnel descriptor for the operator-plane → cloud-plane link.
+#
+# The tunnel originates on the Mac mini gateway (running cloudflared as a
+# LaunchDaemon; see tunnel/service.example.plist) and terminates on
+# Cloudflare's edge. The api/ service in Fly dials internal-rpc.owera.ai;
+# Cloudflare routes that traffic down the tunnel to localhost:9091 on the
+# gateway, where the operator-plane gRPC/HTTP server listens.
+#
+# NO credentials live in this file. The tunnel-credentials JSON sits at
+# /usr/local/etc/cloudflared/{{TUNNEL_UUID}}.json on the gateway (chmod 600)
+# and is referenced by name only — see tunnel/config.example.yml.
+
+tunnel:
+  # The tunnel UUID is provisioned via `cloudflared tunnel create
+  # owera-operator-plane` and stored in 1Password under
+  # "Cloudflare / Owera Operator Plane Tunnel".
+  name: owera-operator-plane
+  uuid_ref: "{{REFERENCE:1password.cloudflare.owera-operator-plane.uuid}}"
+  account_ref: "{{REFERENCE:1password.cloudflare.account_id}}"
+  credentials_file_ref: "{{REFERENCE:gateway.fs:/usr/local/etc/cloudflared/<UUID>.json}}"
+
+ingress:
+  - hostname: internal-rpc.owera.ai
+    service: http://localhost:9091
+    origin_request:
+      # Operator plane terminates TLS internally; tunnel-to-localhost is
+      # plaintext over loopback. Disable origin TLS verification.
+      no_tls_verify: true
+      connect_timeout: 10s
+      tls_timeout: 10s
+      keep_alive_connections: 16
+      keep_alive_timeout: 90s
+
+  # Catch-all: any unmatched hostname returns 404. cloudflared requires a
+  # terminal rule with `service: http_status:404`.
+  - service: http_status:404
+
+# Health check posted by cloudflared to Cloudflare edge every 30s.
+metrics:
+  bind: 127.0.0.1:9300
+
+# Logging: cloudflared writes to stdout/stderr, which the LaunchDaemon
+# redirects to /var/log/cloudflared/{out,err}.log (see service.example.plist).
+loglevel: info
+transport_loglevel: warn

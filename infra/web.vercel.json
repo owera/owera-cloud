@@ -1,0 +1,40 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "buildCommand": "npm run build",
+  "devCommand": "npm run dev",
+  "installCommand": "npm install",
+  "outputDirectory": ".next",
+  "regions": ["gru1", "iad1"],
+  "github": {
+    "silent": false,
+    "autoJobCancelation": true
+  },
+  "env": {
+    "NEXT_PUBLIC_API_URL": "{{REFERENCE:vercel.project.env.NEXT_PUBLIC_API_URL}}",
+    "NEXT_PUBLIC_STATUS_URL": "{{REFERENCE:vercel.project.env.NEXT_PUBLIC_STATUS_URL}}"
+  },
+  "build": {
+    "env": {
+      "NEXT_PUBLIC_API_URL": "{{REFERENCE:vercel.project.env.NEXT_PUBLIC_API_URL}}",
+      "NEXT_PUBLIC_STATUS_URL": "{{REFERENCE:vercel.project.env.NEXT_PUBLIC_STATUS_URL}}"
+    }
+  },
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "X-Frame-Options", "value": "DENY" },
+        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
+        { "key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=()" },
+        { "key": "Strict-Transport-Security", "value": "max-age=63072000; includeSubDomains; preload" }
+      ]
+    }
+  ],
+  "redirects": [
+    { "source": "/status", "destination": "https://status.owera.ai", "permanent": false }
+  ],
+  "cleanUrls": true,
+  "trailingSlash": false
+}
