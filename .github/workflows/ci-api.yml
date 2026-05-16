@@ -1,0 +1,64 @@
+name: ci-api
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "api/**"
+      - ".github/workflows/ci-api.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "api/**"
+      - ".github/workflows/ci-api.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: go build + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: api/go.mod
+          cache: true
+          cache-dependency-path: api/go.sum
+
+      - name: go vet
+        working-directory: api
+        run: go vet ./...
+
+      - name: go build
+        working-directory: api
+        run: go build ./...
+
+      - name: go test
+        working-directory: api
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: coverage summary
+        working-directory: api
+        run: go tool cover -func=coverage.out | tail -1
+
+  golangci-lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: api/go.mod
+          cache: true
+          cache-dependency-path: api/go.sum
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: api

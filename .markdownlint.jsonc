@@ -1,0 +1,31 @@
+// Markdownlint config for owera-cloud.
+//
+// The house style across owera-* repos is operational, table-heavy, with
+// long descriptive lines. Disable the rules that conflict with that style
+// rather than reflowing every table and paragraph.
+{
+  // No hard line-length wrap. Tables and dense prose are intentional.
+  "MD013": false,
+
+  // Table-column-style "compact" (no padding around pipes) is the house
+  // style. Markdownlint's default expects padded pipes; we use compact.
+  "MD060": false,
+
+  // Allow fenced code blocks without a language hint (we use plain ```
+  // for ASCII diagrams and shell-output samples).
+  "MD040": false,
+
+  // Allow inline HTML — used for line breaks inside mermaid sequence
+  // diagrams and inside table cells.
+  "MD033": false,
+
+  // Allow duplicate headings across sections (e.g. multiple "Surface"
+  // sections in different issue templates).
+  "MD024": { "siblings_only": true },
+
+  // Issue templates have YAML frontmatter `name:` plus an in-body `# H1`.
+  // Without this, MD025 treats the frontmatter as a title and the H1 as a
+  // duplicate top-level heading. Setting front_matter_title to an empty
+  // string tells markdownlint not to treat any frontmatter key as a title.
+  "MD025": { "front_matter_title": "" }
+}

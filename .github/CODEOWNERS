@@ -1,0 +1,32 @@
+# CODEOWNERS — owera-cloud
+#
+# @rrecio gets root review on everything. Explicit per-directory entries
+# mirror the four-agent ownership split so review requests are precise.
+# Order matters: later entries override earlier ones for matching paths.
+
+# Default — Rodrigo reviews everything by default.
+*                               @rrecio
+
+# Customer plane — Go API gateway
+/api/                           @rrecio
+
+# Customer plane — Next.js dashboard
+/web/                           @rrecio
+
+# Infra and deployment
+/infra/                         @rrecio
+/tunnel/                        @rrecio
+/status/                        @rrecio
+
+# Compliance — SOC 2 + LGPD artifacts. Always reviewed by Rodrigo.
+/compliance/                    @rrecio
+
+# Developer-facing scaffold (this slice)
+/README.md                      @rrecio
+/CLAUDE.md                      @rrecio
+/CONTRIBUTING.md                @rrecio
+/SECURITY.md                    @rrecio
+/CHANGELOG.md                   @rrecio
+/VERSION                        @rrecio
+/docs/                          @rrecio
+/.github/                       @rrecio
