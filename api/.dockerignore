@@ -1,0 +1,35 @@
+# Keep the build context small + reproducible. Anything not directly
+# required by `go build` belongs here.
+
+# Build artefacts
+*.exe
+*.test
+*.out
+*.prof
+/bin/
+/dist/
+/coverage.out
+
+# IDE/editor noise
+.idea/
+.vscode/
+.DS_Store
+*~
+*.swp
+
+# Test scratch
+testdata/local/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Don't ship test files into the image. The builder stage runs
+# `go build`, which ignores _test.go files at compile time, but
+# excluding them here also keeps the COPY layer smaller.
+**/*_test.go
+
+# Top-level non-Go files we don't need in the container.
+README.md
+Dockerfile
+.dockerignore
