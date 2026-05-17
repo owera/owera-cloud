@@ -18,6 +18,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -261,7 +262,13 @@ func (s *Service) Reconcile(ctx context.Context) (int, error) {
 		}
 		plan, err := s.planFor(ctx, evt)
 		if err != nil {
-			return emitted, fmt.Errorf("billing: dispatch %s: %w", p.EntryID, err)
+			// Skip-and-continue: a single bad row (e.g. legacy meter
+			// name with no StripeRef) must not block the rest of the
+			// queue. The row stays pending (billed_at = NULL) so it
+			// retries on the next tick — operator can fix the
+			// StripeRef or delete the row out-of-band.
+			log.Printf("billing: dispatch %s: %v (skipping; row remains pending)", p.EntryID, err)
+			continue
 		}
 		switch plan.Kind {
 		case DispatchKindSkip:
@@ -277,7 +284,8 @@ func (s *Service) Reconcile(ctx context.Context) (int, error) {
 				IdemKey:     fmt.Sprintf("oneshot:%s:%s", p.TenantID, p.EntryID),
 			}
 			if err := s.backend.EmitOneShot(ctx, emit); err != nil {
-				return emitted, fmt.Errorf("billing: emit oneshot: %w", err)
+				log.Printf("billing: emit oneshot %s: %v (skipping; row remains pending)", p.EntryID, err)
+				continue
 			}
 		default: // DispatchKindMetered or any unrecognised value
 			meter := plan.MeterName
@@ -293,14 +301,16 @@ func (s *Service) Reconcile(ctx context.Context) (int, error) {
 				IdemKey:  fmt.Sprintf("usage:%s:%s", p.TenantID, p.EntryID),
 			}
 			if err := s.backend.EmitUsage(ctx, emit); err != nil {
-				return emitted, fmt.Errorf("billing: emit usage: %w", err)
+				log.Printf("billing: emit usage %s: %v (skipping; row remains pending)", p.EntryID, err)
+				continue
 			}
 		}
 		if _, err := s.db.ExecContext(ctx,
 			`UPDATE billing_outbox SET billed_at=? WHERE id=?`,
 			time.Now().UTC(), p.ID,
 		); err != nil {
-			return emitted, fmt.Errorf("billing: mark billed: %w", err)
+			log.Printf("billing: mark billed %s: %v (will retry)", p.EntryID, err)
+			continue
 		}
 		emitted++
 	}
