@@ -42,6 +42,7 @@ func TestRegisteredRoutes(t *testing.T) {
 		"GET /v1/jobs/{id}",
 		"GET /v1/skus",
 		"GET /v1/usage",
+		"POST /v1/billing/portal",
 		"POST /v1/jobs/",
 		"POST /v1/jobs/{id}/cancel",
 	}

@@ -5,9 +5,12 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -25,13 +28,29 @@ import (
 // Deps bundles the dependencies the server handler chain needs. main()
 // constructs one and passes it to New().
 type Deps struct {
-	Identity   *identity.Store
-	Jobs       *jobs.Store
-	Queue      queue.Queue
-	Dispatcher *dispatcher.Dispatcher
-	Audit      *audit.Log
-	Billing    *billing.Service
-	Status     *status.Service
+	Identity    *identity.Store
+	Jobs        *jobs.Store
+	Queue       queue.Queue
+	Dispatcher  *dispatcher.Dispatcher
+	Audit       *audit.Log
+	Billing     *billing.Service
+	CostCap     *billing.CostCap     // WS-16 T16.5; optional in dev (nil → uncapped)
+	BillPortal  BillingPortalMinter  // WS-16 T16.2; optional in dev (nil → 503)
+	BillCustLkp TenantCustomerLookup // WS-16 T16.2; optional in dev (nil → 503)
+	Status      *status.Service
+}
+
+// BillingPortalMinter is the surface the /v1/billing/portal handler needs.
+// Implemented in production by *billing.StripeBackend; tests stub it.
+type BillingPortalMinter interface {
+	PortalSessionURL(ctx context.Context, stripeCustomerID, returnURL string) (string, error)
+}
+
+// TenantCustomerLookup resolves a tenant_id to its Stripe customer_id.
+// WS-15 (identity) eventually exposes this; until then the Deps wiring may
+// pass nil and the portal handler responds 503.
+type TenantCustomerLookup interface {
+	StripeCustomerID(ctx context.Context, tenantID string) (string, error)
 }
 
 // New returns the http.Handler with all routes registered.
@@ -82,6 +101,7 @@ func New(d Deps) http.Handler {
 	})
 
 	r.Get("/v1/usage", getUsage(d))
+	r.Post("/v1/billing/portal", postBillingPortal(d))
 
 	return r
 }
@@ -123,6 +143,27 @@ func postJob(d Deps) http.HandlerFunc {
 		if err := sku.ValidateInputs(req.Inputs); err != nil {
 			writeErr(w, http.StatusBadRequest, "bad_inputs", err.Error())
 			return
+		}
+		// WS-16 T16.5: cost cap at submission boundary. 402 is the
+		// semantic match ("Payment Required") — not 403 (forbidden) or
+		// 429 (rate-limited) — because the cap is a money decision the
+		// customer can raise from the dashboard.
+		if d.CostCap != nil {
+			if err := d.CostCap.Enforce(r.Context(), tenID, sku.FullName(), req.Inputs); err != nil {
+				var capErr *billing.CapExceededError
+				if errors.As(err, &capErr) {
+					retry := int(time.Until(capErr.RetryAfter).Seconds())
+					if retry < 1 {
+						retry = 1
+					}
+					w.Header().Set("Retry-After", strconv.Itoa(retry))
+					writeErr(w, http.StatusPaymentRequired, "cost_cap_exceeded",
+						capErr.Error())
+					return
+				}
+				writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+				return
+			}
 		}
 		j, _, err := d.Jobs.Submit(r.Context(), tenID, sku.FullName(), req.Inputs, req.IdempotencyKey)
 		if err != nil {
@@ -231,9 +272,9 @@ func listSKUs(w http.ResponseWriter, _ *http.Request) {
 		var schema map[string]any
 		_ = json.Unmarshal([]byte(s.InputsSchema), &schema)
 		wire = append(wire, map[string]any{
-			"name":     s.Name,
-			"version":  s.Version,
-			"category": s.Category,
+			"name":          s.Name,
+			"version":       s.Version,
+			"category":      s.Category,
 			"inputs_schema": schema,
 			"pricing": map[string]any{
 				"model":        s.Pricing.Model,
@@ -248,6 +289,53 @@ func listSKUs(w http.ResponseWriter, _ *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"skus": wire})
+}
+
+type billingPortalReq struct {
+	ReturnURL string `json:"return_url"`
+}
+
+type billingPortalResp struct {
+	URL string `json:"url"`
+}
+
+func postBillingPortal(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tenID := identity.TenantID(r.Context())
+		if tenID == "" {
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "missing tenant")
+			return
+		}
+		if d.BillPortal == nil || d.BillCustLkp == nil {
+			writeErr(w, http.StatusServiceUnavailable, "billing_unconfigured",
+				"stripe portal not wired in this build")
+			return
+		}
+		var req billingPortalReq
+		_ = json.NewDecoder(r.Body).Decode(&req) // body optional
+		if req.ReturnURL == "" {
+			req.ReturnURL = "https://app.owera.ai/billing"
+		}
+		custID, err := d.BillCustLkp.StripeCustomerID(r.Context(), tenID)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		if custID == "" {
+			writeErr(w, http.StatusConflict, "no_stripe_customer",
+				"tenant has no Stripe customer; complete onboarding first")
+			return
+		}
+		url, err := d.BillPortal.PortalSessionURL(r.Context(), custID, req.ReturnURL)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, "stripe_portal", err.Error())
+			return
+		}
+		if d.Audit != nil {
+			_ = d.Audit.Append(r.Context(), audit.FromRequest(r, tenID, "", "billing.portal.open", custID))
+		}
+		writeJSON(w, http.StatusOK, billingPortalResp{URL: url})
+	}
 }
 
 func getUsage(d Deps) http.HandlerFunc {
@@ -326,4 +414,3 @@ func fmtSscanf(s string, dst *int) (int, error) {
 	*dst = n
 	return 1, nil
 }
-

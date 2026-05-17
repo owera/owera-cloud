@@ -74,7 +74,10 @@ func run(addr, dbPath string) error {
 		Dispatcher: disp,
 		Audit:      auditLog,
 		Billing:    billingSvc,
-		Status:     statusSvc,
+		// CostCap / BillPortal / BillCustLkp are intentionally nil in dev
+		// — production wires them once the Stripe key + WS-15 identity
+		// surfaces (StripeCustomerID + GetMonthlyCapCents) are available.
+		Status: statusSvc,
 	}
 
 	h := server.New(deps)
