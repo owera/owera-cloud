@@ -37,9 +37,10 @@ type Deps struct {
 	Billing     *billing.Service
 	CostCap     *billing.CostCap     // WS-16 T16.5; optional in dev (nil → uncapped)
 	BillPortal  BillingPortalMinter  // WS-16 T16.2; optional in dev (nil → 503)
-	BillCustLkp TenantCustomerLookup // WS-16 T16.2; optional in dev (nil → 503)
+	BillCustLkp TenantCustomerLookup     // WS-16 T16.2; optional in dev (nil → 503)
+	ClerkAuth   auth.ClerkAuthenticator  // IDE-2 dual-auth; nil → API-key-only (dev default)
 	Status      *status.Service
-	Erasure     *erasure.Service // WS-18 T18.2; LGPD/GDPR right-to-erasure
+	Erasure     *erasure.Service         // WS-18 T18.2; LGPD/GDPR right-to-erasure
 }
 
 // BillingPortalMinter is the surface the /v1/billing/portal handler needs.
@@ -74,7 +75,7 @@ func New(d Deps) http.Handler {
 		}
 		return false
 	}
-	r.Use(auth.Middleware(d.Identity, skip))
+	r.Use(auth.MiddlewareWithClerk(d.Identity, d.ClerkAuth, skip))
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

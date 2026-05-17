@@ -25,12 +25,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/owera/owera-cloud/api/internal/audit"
+	"github.com/owera/owera-cloud/api/internal/auth"
 	"github.com/owera/owera-cloud/api/internal/billing"
-	_ "github.com/owera/owera-cloud/api/internal/catalog" // registers SKUs
+	"github.com/owera/owera-cloud/api/internal/catalog"
 	"github.com/owera/owera-cloud/api/internal/dispatcher"
 	"github.com/owera/owera-cloud/api/internal/erasure"
 	"github.com/owera/owera-cloud/api/internal/identity"
@@ -58,18 +60,36 @@ type wiring struct {
 	portal       server.BillingPortalMinter
 	ledger       dispatcher.LedgerPoller
 	ledgerLabel  string // "tunnel (<url>)" | "synthetic"
+	clerk        auth.ClerkAuthenticator
+	clerkLabel   string // "clerk (<issuer>)" | "disabled"
+	defaultCap   int64  // monthly cost cap when tenant has no override
 }
 
 // chooseWiring resolves env-driven production vs dev backends. idStore
 // is needed by the Stripe resolver path. Returns an error only when env
 // is half-configured in a way that would fail later anyway (e.g.
 // STRIPE_SECRET_KEY set but resolver construction fails).
+//
+// Env vars consumed:
+//
+//	STRIPE_SECRET_KEY     real Stripe backend; the same backend doubles
+//	                      as the BillingPortalMinter
+//	OPERATOR_RPC_URL      real LedgerTailClient against the Cloudflare-
+//	                      tunnel JSON-RPC endpoint
+//	CLERK_JWT_ISSUER      real Clerk verifier for the dashboard JWT path
+//	                      (auth middleware accepts both API keys and
+//	                      Clerk JWTs)
+//	OWERA_DEFAULT_CAP_CENTS  monthly cost-cap default (cents) for
+//	                         tenants that haven't set their own;
+//	                         defaults to 20000 ($200/mo)
 func chooseWiring(idStore *identity.Store) (wiring, error) {
 	w := wiring{
 		billing:      &billing.FakeBackend{},
 		billingLabel: "fake",
 		ledger:       dispatcher.NewSyntheticLedgerPoller(),
 		ledgerLabel:  "synthetic",
+		clerkLabel:   "disabled",
+		defaultCap:   defaultCapCentsFromEnv(),
 	}
 
 	if os.Getenv("STRIPE_SECRET_KEY") != "" {
@@ -91,7 +111,31 @@ func chooseWiring(idStore *identity.Store) (wiring, error) {
 		w.ledgerLabel = "tunnel (" + url + ")"
 	}
 
+	if iss := os.Getenv("CLERK_JWT_ISSUER"); iss != "" {
+		verifier, err := auth.NewClerkVerifier(context.Background(), iss, nil)
+		if err != nil {
+			return wiring{}, err
+		}
+		w.clerk = verifier
+		w.clerkLabel = "clerk (" + iss + ")"
+	}
+
 	return w, nil
+}
+
+// defaultCapCentsFromEnv parses OWERA_DEFAULT_CAP_CENTS. Unset or bad
+// input returns the docs/pricing.md baseline of $200/mo (20000 cents).
+func defaultCapCentsFromEnv() int64 {
+	const fallback int64 = 20000
+	v := os.Getenv("OWERA_DEFAULT_CAP_CENTS")
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n < 0 {
+		return fallback
+	}
+	return n
 }
 
 func run(addr, dbPath string) error {
@@ -118,17 +162,24 @@ func run(addr, dbPath string) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("apiserver: billing=%s, ledger=%s", w.billingLabel, w.ledgerLabel)
+	log.Printf("apiserver: billing=%s, ledger=%s, auth=%s, default_cap_cents=%d",
+		w.billingLabel, w.ledgerLabel, w.clerkLabel, w.defaultCap)
 
 	billingSvc, err := billing.New(idStore.DB(), w.billing)
 	if err != nil {
 		return err
 	}
-	// SetDispatcher hook for the metered/oneshot SKU router. CPE-2 owns
-	// the production CatalogDispatcher; until it lands we deliberately
-	// leave the dispatcher unset (Service falls back to its default
-	// planFor path).
-	billingSvc.SetDispatcher(nil)
+	// Route metered vs per-job-fixed SKUs through their respective
+	// emit paths (EmitUsage vs EmitOneShot) per catalog.Pricing.Model.
+	billingSvc.SetDispatcher(catalog.NewDispatcher())
+
+	// Cost cap is wired against identity.Store (cap source) + catalog
+	// pricer. Returns 402 + Retry-After at /v1/jobs when a submission
+	// would push the tenant over their monthly cap.
+	costCap, err := billing.NewCostCap(billingSvc, idStore, catalog.NewPricer(), w.defaultCap, nil)
+	if err != nil {
+		return err
+	}
 
 	erasureSvc, err := erasure.New(idStore.DB(), erasure.AdaptQueue(q), auditLog)
 	if err != nil {
@@ -145,11 +196,12 @@ func run(addr, dbPath string) error {
 		Dispatcher:  disp,
 		Audit:       auditLog,
 		Billing:     billingSvc,
+		CostCap:     costCap,
 		BillPortal:  w.portal, // nil unless STRIPE_SECRET_KEY is set
 		BillCustLkp: idStore,  // identity.Store satisfies TenantCustomerLookup directly
-		// CostCap stays nil until the cap-store + pricer wiring lands.
-		Status:  statusSvc,
-		Erasure: erasureSvc,
+		ClerkAuth:   w.clerk,  // nil unless CLERK_JWT_ISSUER is set
+		Status:      statusSvc,
+		Erasure:     erasureSvc,
 	}
 
 	workerCtx, workerCancel := context.WithCancel(context.Background())
