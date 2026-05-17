@@ -141,12 +141,15 @@ func (s *Store) migrate() error {
 			id                  TEXT PRIMARY KEY,
 			name                TEXT NOT NULL,
 			created_at          DATETIME NOT NULL,
-			stripe_customer_id  TEXT
+			stripe_customer_id  TEXT,
+			monthly_cap_cents   INTEGER
 		)`,
-		// Idempotent column add for existing databases — SQLite does not
-		// support IF NOT EXISTS on ALTER, so the error is swallowed
-		// inside migrate via the duplicate-column check below.
+		// Idempotent column adds for existing databases — SQLite does not
+		// support IF NOT EXISTS on ALTER, so the duplicate-column error is
+		// swallowed inside migrate. APE-3 added monthly_cap_cents; coexists
+		// with the earlier stripe_customer_id ALTER.
 		`ALTER TABLE tenants ADD COLUMN stripe_customer_id TEXT`,
+		`ALTER TABLE tenants ADD COLUMN monthly_cap_cents INTEGER`,
 		`CREATE TABLE IF NOT EXISTS users (
 			id          TEXT PRIMARY KEY,
 			tenant_id   TEXT NOT NULL REFERENCES tenants(id),
@@ -242,6 +245,58 @@ func (s *Store) SetStripeCustomerID(ctx context.Context, tenantID, stripeCustome
 		return ErrNotFound
 	}
 	return nil
+}
+
+// SetMonthlyCap stores the tenant's monthly cost cap in cents. The
+// billing.CostCap reads this via [Store.MonthlyCap] at job-submission
+// time. A negative value means "no cap"; zero means "use the system
+// default". Onboarding (T20.1) sets this once per customer per the MSA.
+func (s *Store) SetMonthlyCap(ctx context.Context, tenantID string, cents int64) error {
+	if tenantID == "" {
+		return errors.New("identity: empty tenant_id")
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE tenants SET monthly_cap_cents=? WHERE id=?`,
+		cents, tenantID,
+	)
+	if err != nil {
+		return fmt.Errorf("identity: set monthly_cap_cents: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("identity: set monthly_cap_cents rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// MonthlyCap returns the tenant's monthly cost cap in cents, or 0 if
+// unset (the caller's "use default" signal). Negative values mean "no
+// cap." ErrNotFound surfaces when the tenant doesn't exist.
+func (s *Store) MonthlyCap(ctx context.Context, tenantID string) (int64, error) {
+	if tenantID == "" {
+		return 0, errors.New("identity: empty tenant_id")
+	}
+	row := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(monthly_cap_cents,0) FROM tenants WHERE id=?`, tenantID)
+	var cents int64
+	if err := row.Scan(&cents); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrNotFound
+		}
+		return 0, fmt.Errorf("identity: get monthly_cap_cents: %w", err)
+	}
+	return cents, nil
+}
+
+// GetMonthlyCapCents satisfies billing.TenantCapStore (the interface
+// billing.CostCap consumes). Identical to MonthlyCap; the alias exists
+// so *identity.Store can be passed directly to NewCostCap without an
+// adapter type.
+func (s *Store) GetMonthlyCapCents(ctx context.Context, tenantID string) (int64, error) {
+	return s.MonthlyCap(ctx, tenantID)
 }
 
 // StripeCustomerID returns the Stripe customer id bound to a tenant, or
