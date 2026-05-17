@@ -19,6 +19,11 @@ jobs:
   analyze:
     name: analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
+    # CodeQL alert upload requires GitHub Advanced Security, which is
+    # free on public repos and paid on private ones. While the repo is
+    # private the job no-ops; once visibility flips public per the
+    # Wave-9 operator track, it activates automatically.
+    if: github.event.repository.private == false || github.event.repository.visibility == 'public'
     strategy:
       fail-fast: false
       matrix:
