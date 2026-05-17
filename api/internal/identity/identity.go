@@ -44,14 +44,14 @@ type User struct {
 // from [Store.IssueAPIKey]; on every subsequent lookup the caller provides
 // the plaintext token and the store re-hashes it.
 type APIKey struct {
-	ID         string
-	TenantID   string
-	UserID     string
-	Prefix     string // first 8 chars of the plaintext token, for display
-	HashHex    string
-	Label      string
-	CreatedAt  time.Time
-	RevokedAt  *time.Time
+	ID        string
+	TenantID  string
+	UserID    string
+	Prefix    string // first 8 chars of the plaintext token, for display
+	HashHex   string
+	Label     string
+	CreatedAt time.Time
+	RevokedAt *time.Time
 }
 
 // Store is the persistence boundary for identity.

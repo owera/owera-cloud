@@ -231,9 +231,9 @@ func listSKUs(w http.ResponseWriter, _ *http.Request) {
 		var schema map[string]any
 		_ = json.Unmarshal([]byte(s.InputsSchema), &schema)
 		wire = append(wire, map[string]any{
-			"name":     s.Name,
-			"version":  s.Version,
-			"category": s.Category,
+			"name":          s.Name,
+			"version":       s.Version,
+			"category":      s.Category,
 			"inputs_schema": schema,
 			"pricing": map[string]any{
 				"model":        s.Pricing.Model,
@@ -326,4 +326,3 @@ func fmtSscanf(s string, dst *int) (int, error) {
 	*dst = n
 	return 1, nil
 }
-

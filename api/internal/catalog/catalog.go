@@ -172,9 +172,9 @@ func List() []*SKU {
 // ErrNotFound is returned by [Lookup] when the SKU is not registered.
 var ErrNotFound = errors.New("catalog: sku not found")
 
-// reset is exported for tests that need an isolated registry. Production
-// code should never call it.
-func reset() {
+// Reset clears the package-level registry. Intended for tests that need
+// an isolated registry; production code must never call it.
+func Reset() {
 	regMu.Lock()
 	defer regMu.Unlock()
 	registry = map[string]*SKU{}
