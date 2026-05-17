@@ -17,19 +17,26 @@ type StripeRef struct {
 // live-mode-safe (livemode: false on the Stripe objects). The Reconciler
 // and Subscriber may exercise these IDs end-to-end without billing risk.
 //
-// One slot is intentionally a placeholder:
+// triage-watch:ticket is metered against the Stripe Billing Meter
+// referenced by [MeterTriageWatchTickets] — Subscriber must emit
+// `meter_events` with event_name="tickets_processed" carrying
+// `stripe_customer_id` and `value` payload keys.
 //
-//   - triage-watch:ticket requires a metered Stripe price, which (under
-//     Stripe API ≥ 2025-03-31) must be backed by a Billing Meter object.
-//     The Claude Stripe MCP does not expose the /v1/billing/meters API,
-//     so the meter + matching metered price must be created in a follow-
-//     up via the Stripe dashboard or a direct API call. Until then this
-//     ref carries `price_PENDING_meter_setup` and Subscriber must short-
-//     circuit when it sees that value (see UsageEmit guard).
-//
-// The Piton-Tec-account refs the earlier WS-16 PR shipped (prod_UWxqPxgISCp6QI
-// + prod_UWxqGIt0waFuwb) were archived (active=false) on 2026-05-17 once
-// the wrong-account state was caught; they are replaced here.
+// Cleanup record:
+//   - prod_UWxqPxgISCp6QI (Owera triage-watch, Piton Tec live) — archived
+//   - prod_UWxqGIt0waFuwb (Owera campaign-swarm, Piton Tec live) — archived
+//   - prod_UX4s2ufwHsFhMV (Owera Agentic — triage-watch, Owera Fleet live
+//     misfire before test-mode was confirmed) — archived
+//   - price_1TY183ADrWLjH4u9Bvzx0Dbn (triage-watch:ticket at $0.02 — initial
+//     dashboard-instruction math error) — archived; replaced by the $2.00
+//     metered price below.
+const (
+	// MeterTriageWatchTickets is the Stripe Billing Meter ID for the
+	// tickets_processed event. Used by the Subscriber when emitting
+	// meter_events under Stripe API ≥ 2025-03-31. Event payload shape:
+	//   { "stripe_customer_id": "cus_...", "value": <ticket_count> }
+	MeterTriageWatchTickets = "mtr_test_61UhP1kSUm0YEN6dq41ADrWLjH4u9DgG"
+)
 var StripeRefs = []StripeRef{
 	{
 		OweraRef:  "triage-watch:base",
@@ -40,7 +47,7 @@ var StripeRefs = []StripeRef{
 	{
 		OweraRef:  "triage-watch:ticket",
 		ProductID: "prod_UX51tmYQqoapDb",
-		PriceID:   "price_PENDING_meter_setup", // see package comment
+		PriceID:   "price_1TY1BVADrWLjH4u9FmGDE6n5", // $2/ticket metered, meter=MeterTriageWatchTickets
 		Mode:      "test",
 	},
 	{
