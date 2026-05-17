@@ -12,44 +12,53 @@ type StripeRef struct {
 
 // StripeRefs is the V0 SKU → Stripe product/price map for the billing pipeline.
 //
-// The PriceID values prefixed `price_TEST_` are placeholders — they need to be
-// replaced once a Stripe MCP / API key bound to TEST mode is wired up (the
-// initial test-mode product creation could not complete because the only
-// available Stripe credential is in live mode; see PR body for the follow-up).
-// The ProductID values for the two services were created during T16.1 and are
-// real Stripe objects; live-mode prices were intentionally NOT attached.
+// Created 2026-05-17 in Stripe TEST mode on account acct_1TY0f6ADrWLjH4u9
+// ("Owera Fleet") via the Claude Stripe MCP. All entries below are real,
+// live-mode-safe (livemode: false on the Stripe objects). The Reconciler
+// and Subscriber may exercise these IDs end-to-end without billing risk.
 //
-// Reconciler and Subscriber must NEVER hit live prices until the placeholders
-// are replaced. The presence of `price_TEST_` is the guard.
+// One slot is intentionally a placeholder:
+//
+//   - triage-watch:ticket requires a metered Stripe price, which (under
+//     Stripe API ≥ 2025-03-31) must be backed by a Billing Meter object.
+//     The Claude Stripe MCP does not expose the /v1/billing/meters API,
+//     so the meter + matching metered price must be created in a follow-
+//     up via the Stripe dashboard or a direct API call. Until then this
+//     ref carries `price_PENDING_meter_setup` and Subscriber must short-
+//     circuit when it sees that value (see UsageEmit guard).
+//
+// The Piton-Tec-account refs the earlier WS-16 PR shipped (prod_UWxqPxgISCp6QI
+// + prod_UWxqGIt0waFuwb) were archived (active=false) on 2026-05-17 once
+// the wrong-account state was caught; they are replaced here.
 var StripeRefs = []StripeRef{
 	{
 		OweraRef:  "triage-watch:base",
-		ProductID: "prod_UWxqPxgISCp6QI",
-		PriceID:   "price_TEST_triagewatch_base",
+		ProductID: "prod_UX51tmYQqoapDb",
+		PriceID:   "price_1TY0t6ADrWLjH4u99oBiv3pC", // $499/mo recurring licensed
 		Mode:      "test",
 	},
 	{
 		OweraRef:  "triage-watch:ticket",
-		ProductID: "prod_UWxqPxgISCp6QI",
-		PriceID:   "price_TEST_triagewatch_ticket",
+		ProductID: "prod_UX51tmYQqoapDb",
+		PriceID:   "price_PENDING_meter_setup", // see package comment
 		Mode:      "test",
 	},
 	{
 		OweraRef:  "campaign-swarm:S",
-		ProductID: "prod_UWxqGIt0waFuwb",
-		PriceID:   "price_TEST_campaignswarm_S",
+		ProductID: "prod_UX52Sgla8ZRujL",
+		PriceID:   "price_1TY0vIADrWLjH4u9Fxi2Pdyt", // $499 one_time
 		Mode:      "test",
 	},
 	{
 		OweraRef:  "campaign-swarm:M",
-		ProductID: "prod_UWxqGIt0waFuwb",
-		PriceID:   "price_TEST_campaignswarm_M",
+		ProductID: "prod_UX52Sgla8ZRujL",
+		PriceID:   "price_1TY0vSADrWLjH4u9Thr8xXtB", // $999 one_time
 		Mode:      "test",
 	},
 	{
 		OweraRef:  "campaign-swarm:L",
-		ProductID: "prod_UWxqGIt0waFuwb",
-		PriceID:   "price_TEST_campaignswarm_L",
+		ProductID: "prod_UX52Sgla8ZRujL",
+		PriceID:   "price_1TY0vnADrWLjH4u9PPfkd7B4", // $1,999 one_time
 		Mode:      "test",
 	},
 }
