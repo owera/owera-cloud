@@ -49,6 +49,12 @@ type StripeBackend struct {
 }
 
 // NewStripeBackend constructs the Stripe-backed Backend.
+//
+// The package-level helpers `invoiceitem.New`, `usagerecordsummary.List`,
+// `meterevent.New`, etc. read `stripe.Key` from the package singleton —
+// so we set it here in addition to constructing a keyed *client.API.
+// Without the global, the package helpers return 401 from Stripe even
+// though `c.InvoiceItems` etc. on the client would work.
 func NewStripeBackend(resolver CustomerResolver) (*StripeBackend, error) {
 	key := os.Getenv("STRIPE_SECRET_KEY")
 	if key == "" {
@@ -57,6 +63,7 @@ func NewStripeBackend(resolver CustomerResolver) (*StripeBackend, error) {
 	if resolver == nil {
 		return nil, errors.New("billing: nil CustomerResolver")
 	}
+	stripe.Key = key
 	c := client.New(key, nil)
 	return &StripeBackend{client: c, resolver: resolver}, nil
 }
