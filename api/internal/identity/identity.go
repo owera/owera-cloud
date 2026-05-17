@@ -51,10 +51,16 @@ const (
 
 // Tenant is the unit of isolation. Every other row in the system has a
 // tenant_id FK back to one of these.
+//
+// StripeCustomerID is empty until billing onboarding runs
+// [Store.SetStripeCustomerID]; once set, the Stripe-side cus_... is the
+// recipient for meter_event payloads (T16.3) and Customer Portal sessions
+// (T16.2).
 type Tenant struct {
-	ID        string
-	Name      string
-	CreatedAt time.Time
+	ID               string
+	Name             string
+	CreatedAt        time.Time
+	StripeCustomerID string
 }
 
 // User is a human (or system account) inside a tenant. Users may hold
@@ -132,10 +138,15 @@ func (s *Store) DB() *sql.DB { return s.db }
 func (s *Store) migrate() error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS tenants (
-			id          TEXT PRIMARY KEY,
-			name        TEXT NOT NULL,
-			created_at  DATETIME NOT NULL
+			id                  TEXT PRIMARY KEY,
+			name                TEXT NOT NULL,
+			created_at          DATETIME NOT NULL,
+			stripe_customer_id  TEXT
 		)`,
+		// Idempotent column add for existing databases — SQLite does not
+		// support IF NOT EXISTS on ALTER, so the error is swallowed
+		// inside migrate via the duplicate-column check below.
+		`ALTER TABLE tenants ADD COLUMN stripe_customer_id TEXT`,
 		`CREATE TABLE IF NOT EXISTS users (
 			id          TEXT PRIMARY KEY,
 			tenant_id   TEXT NOT NULL REFERENCES tenants(id),
@@ -159,6 +170,13 @@ func (s *Store) migrate() error {
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
+			// SQLite has no IF NOT EXISTS for ALTER. Re-running the
+			// migration on a DB that already has stripe_customer_id
+			// surfaces as "duplicate column name"; swallow that one
+			// case so migrate() stays idempotent across upgrades.
+			if strings.Contains(err.Error(), "duplicate column name") {
+				continue
+			}
 			return fmt.Errorf("identity: migrate: %w (stmt=%s)", err, stmt)
 		}
 	}
@@ -187,15 +205,64 @@ func (s *Store) CreateTenant(ctx context.Context, name string) (*Tenant, error) 
 // GetTenant looks up a tenant by ID.
 func (s *Store) GetTenant(ctx context.Context, id string) (*Tenant, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id,name,created_at FROM tenants WHERE id=?`, id)
+		`SELECT id,name,created_at,COALESCE(stripe_customer_id,'') FROM tenants WHERE id=?`, id)
 	var t Tenant
-	if err := row.Scan(&t.ID, &t.Name, &t.CreatedAt); err != nil {
+	if err := row.Scan(&t.ID, &t.Name, &t.CreatedAt, &t.StripeCustomerID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("identity: get tenant: %w", err)
 	}
 	return &t, nil
+}
+
+// SetStripeCustomerID associates a Stripe customer (cus_...) with the
+// tenant. Idempotent — re-setting the same value is a no-op; switching
+// it overwrites the prior value. Onboarding (T20.1) calls this once
+// per customer after the Stripe customer is provisioned.
+func (s *Store) SetStripeCustomerID(ctx context.Context, tenantID, stripeCustomerID string) error {
+	if tenantID == "" {
+		return errors.New("identity: empty tenant_id")
+	}
+	if stripeCustomerID == "" {
+		return errors.New("identity: empty stripe_customer_id")
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE tenants SET stripe_customer_id=? WHERE id=?`,
+		stripeCustomerID, tenantID,
+	)
+	if err != nil {
+		return fmt.Errorf("identity: set stripe_customer_id: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("identity: set stripe_customer_id rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// StripeCustomerID returns the Stripe customer id bound to a tenant, or
+// the empty string if billing onboarding has not yet run for it. Empty
+// is not an error — callers downstream of billing (Customer Portal,
+// meter_event Subscriber) must short-circuit with a 503 / structured
+// "not configured" error when they see "".
+func (s *Store) StripeCustomerID(ctx context.Context, tenantID string) (string, error) {
+	if tenantID == "" {
+		return "", errors.New("identity: empty tenant_id")
+	}
+	row := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(stripe_customer_id,'') FROM tenants WHERE id=?`, tenantID)
+	var cust string
+	if err := row.Scan(&cust); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", fmt.Errorf("identity: get stripe_customer_id: %w", err)
+	}
+	return cust, nil
 }
 
 // CreateUser adds a user under a tenant.
