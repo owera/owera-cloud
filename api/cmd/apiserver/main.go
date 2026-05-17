@@ -1,8 +1,20 @@
 // Command apiserver runs the Owera Cloud customer API on :8080. It wires
-// the SQLite-backed identity/jobs/queue/audit/billing stores, a fake
-// dispatcher transport (production swap-in is the Cloudflare-tunnel
-// client), the status service, and the chi router; then serves HTTP with
-// graceful shutdown on SIGINT/SIGTERM.
+// the SQLite-backed identity/jobs/queue/audit/billing stores, the
+// dispatcher transport, the status service, and the chi router; then
+// serves HTTP with graceful shutdown on SIGINT/SIGTERM.
+//
+// Production wiring is env-driven so the same binary boots in dev (all
+// fakes) or prod (Stripe + LedgerTail) without recompiling:
+//
+//   - STRIPE_SECRET_KEY set → real *billing.StripeBackend backed by
+//     the identity-store customer resolver (and the same backend is
+//     reused as the BillingPortalMinter). Unset → *billing.FakeBackend.
+//   - OPERATOR_RPC_URL set → real dispatcher.LedgerTailClient pointed
+//     at the Cloudflare-tunnel JSON-RPC endpoint. Unset →
+//     dispatcher.SyntheticLedgerPoller.
+//
+// Both unset is the all-fakes dev mode and matches the pre-wire-up
+// behaviour.
 package main
 
 import (
@@ -38,6 +50,50 @@ func main() {
 	}
 }
 
+// wiring captures the env-driven backend choices so run() and the tests
+// can describe them with one log line.
+type wiring struct {
+	billing      billing.Backend
+	billingLabel string // "stripe" | "fake"
+	portal       server.BillingPortalMinter
+	ledger       dispatcher.LedgerPoller
+	ledgerLabel  string // "tunnel (<url>)" | "synthetic"
+}
+
+// chooseWiring resolves env-driven production vs dev backends. idStore
+// is needed by the Stripe resolver path. Returns an error only when env
+// is half-configured in a way that would fail later anyway (e.g.
+// STRIPE_SECRET_KEY set but resolver construction fails).
+func chooseWiring(idStore *identity.Store) (wiring, error) {
+	w := wiring{
+		billing:      &billing.FakeBackend{},
+		billingLabel: "fake",
+		ledger:       dispatcher.NewSyntheticLedgerPoller(),
+		ledgerLabel:  "synthetic",
+	}
+
+	if os.Getenv("STRIPE_SECRET_KEY") != "" {
+		resolver, err := billing.NewIdentityCustomerResolver(idStore)
+		if err != nil {
+			return wiring{}, err
+		}
+		sb, err := billing.NewStripeBackend(resolver)
+		if err != nil {
+			return wiring{}, err
+		}
+		w.billing = sb
+		w.billingLabel = "stripe"
+		w.portal = sb
+	}
+
+	if url := os.Getenv("OPERATOR_RPC_URL"); url != "" {
+		w.ledger = dispatcher.NewLedgerTailClient(url, nil)
+		w.ledgerLabel = "tunnel (" + url + ")"
+	}
+
+	return w, nil
+}
+
 func run(addr, dbPath string) error {
 	idStore, err := identity.Open(dbPath)
 	if err != nil {
@@ -57,41 +113,48 @@ func run(addr, dbPath string) error {
 	if err != nil {
 		return err
 	}
-	billingSvc, err := billing.New(idStore.DB(), &billing.FakeBackend{})
+
+	w, err := chooseWiring(idStore)
 	if err != nil {
 		return err
 	}
+	log.Printf("apiserver: billing=%s, ledger=%s", w.billingLabel, w.ledgerLabel)
+
+	billingSvc, err := billing.New(idStore.DB(), w.billing)
+	if err != nil {
+		return err
+	}
+	// SetDispatcher hook for the metered/oneshot SKU router. CPE-2 owns
+	// the production CatalogDispatcher; until it lands we deliberately
+	// leave the dispatcher unset (Service falls back to its default
+	// planFor path).
+	billingSvc.SetDispatcher(nil)
+
 	erasureSvc, err := erasure.New(idStore.DB(), erasure.AdaptQueue(q), auditLog)
 	if err != nil {
 		return err
 	}
-	// Operator-plane transport — scaffold uses the fake; production wires
-	// the Cloudflare-tunnel client here. The seam is the Transport
-	// interface in internal/dispatcher.
 	transport := dispatcher.NewInMemoryTransport()
 	disp := dispatcher.New(transport)
 	statusSvc := status.New(transport, 30*time.Second)
 
 	deps := server.Deps{
-		Identity:   idStore,
-		Jobs:       jobsStore,
-		Queue:      q,
-		Dispatcher: disp,
-		Audit:      auditLog,
-		Billing:    billingSvc,
-		// CostCap / BillPortal / BillCustLkp are intentionally nil in dev
-		// — production wires them once the Stripe key + WS-15 identity
-		// surfaces (StripeCustomerID + GetMonthlyCapCents) are available.
+		Identity:    idStore,
+		Jobs:        jobsStore,
+		Queue:       q,
+		Dispatcher:  disp,
+		Audit:       auditLog,
+		Billing:     billingSvc,
+		BillPortal:  w.portal, // nil unless STRIPE_SECRET_KEY is set
+		BillCustLkp: idStore,  // identity.Store satisfies TenantCustomerLookup directly
+		// CostCap stays nil until the cap-store + pricer wiring lands.
 		Status:  statusSvc,
 		Erasure: erasureSvc,
 	}
 
-	// Background dispatcher worker. The synthetic ledger poller is the
-	// stand-in until the operator plane exposes fleet.LedgerTail; see
-	// PR open question.
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	defer workerCancel()
-	worker := dispatcher.NewWorker(q, disp, jobsStore, dispatcher.NewSyntheticLedgerPoller(), dispatcher.DefaultWorkerConfig())
+	worker := dispatcher.NewWorker(q, disp, jobsStore, w.ledger, dispatcher.DefaultWorkerConfig())
 	go worker.Run(workerCtx)
 
 	h := server.New(deps)
