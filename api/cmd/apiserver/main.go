@@ -19,8 +19,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -56,7 +58,8 @@ func main() {
 // can describe them with one log line.
 type wiring struct {
 	billing       billing.Backend
-	billingLabel  string // "stripe" | "fake"
+	billingLabel  string                 // "stripe" | "fake"
+	stripeBackend *billing.StripeBackend // non-nil only when billingLabel=="stripe"; used as StripeUsageReporter for the drift reconciler
 	portal        server.BillingPortalMinter
 	ledger        dispatcher.LedgerPoller
 	ledgerLabel   string // "tunnel (<url>)" | "synthetic"
@@ -108,6 +111,7 @@ func chooseWiring(idStore *identity.Store) (wiring, error) {
 		}
 		w.billing = sb
 		w.billingLabel = "stripe"
+		w.stripeBackend = sb
 		w.portal = sb
 	}
 
@@ -222,6 +226,30 @@ func run(addr, dbPath string) error {
 	worker := dispatcher.NewWorker(q, disp, jobsStore, w.ledger, dispatcher.DefaultWorkerConfig())
 	go worker.Run(workerCtx)
 
+	// Outbox flusher: ticks the billing service's Reconcile, which drains
+	// the per-tenant outbox into the configured Backend (Stripe in prod,
+	// FakeBackend in dev). The cron-style daily reconciler binary in
+	// cmd/reconciler/ does drift detection only; without this in-process
+	// ticker the outbox accumulates and Stripe never sees the events.
+	reconcileInterval := reconcileIntervalFromEnv()
+	go runOutboxFlusher(workerCtx, billingSvc, reconcileInterval)
+
+	// Daily drift detector: compares ledger sums vs Stripe-reported usage
+	// per tenant for yesterday's window and alerts on drift > 0.5%. Wired
+	// only when Stripe + ledger are both real — synthetic ledger + fake
+	// Stripe would always read drift=0 and add no signal.
+	reconcilerOn := w.billingLabel == "stripe" && w.ledgerLabel != "synthetic" && w.stripeBackend != nil
+	if reconcilerOn {
+		rec, err := billing.NewReconciler(billingSvc, w.stripeBackend, &logAlerter{})
+		if err != nil {
+			return err
+		}
+		go runDriftReconciler(workerCtx, rec)
+		log.Printf("apiserver: reconciler=on (drift detector, daily)")
+	} else {
+		log.Printf("apiserver: reconciler=off (requires billing=stripe + ledger!=synthetic)")
+	}
+
 	h := server.New(deps)
 	srv := &http.Server{
 		Addr:              addr,
@@ -258,5 +286,102 @@ func run(addr, dbPath string) error {
 	if err := srv.Shutdown(ctx); err != nil {
 		return err
 	}
+	return nil
+}
+
+// reconcileIntervalFromEnv parses OWERA_RECONCILE_INTERVAL as a Go
+// duration (e.g. "30s", "2m"). Unset or invalid input returns 60s, which
+// matches the V0 expectation of "outbox→Stripe latency under a minute"
+// without hammering the Stripe API.
+func reconcileIntervalFromEnv() time.Duration {
+	const fallback = 60 * time.Second
+	v := os.Getenv("OWERA_RECONCILE_INTERVAL")
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		log.Printf("apiserver: bad OWERA_RECONCILE_INTERVAL=%q, defaulting to %s", v, fallback)
+		return fallback
+	}
+	return d
+}
+
+// runOutboxFlusher ticks billing.Service.Reconcile every interval until
+// ctx is cancelled. Each tick flushes any unbilled rows in the outbox
+// to the configured Backend. Errors are logged and the loop continues —
+// a transient Stripe failure shouldn't take the apiserver down.
+func runOutboxFlusher(ctx context.Context, svc *billing.Service, interval time.Duration) {
+	log.Printf("apiserver: outbox flusher starting, interval=%s", interval)
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("apiserver: outbox flusher stopping")
+			return
+		case <-t.C:
+			n, err := svc.Reconcile(ctx)
+			log.Printf("apiserver: reconciler flushed=%d err=%v", n, err)
+		}
+	}
+}
+
+// runDriftReconciler ticks the daily drift detector. billing.Reconciler.Run
+// does one cycle per call (not self-ticking), so wrap in a 24h ticker.
+// Each cycle compares the previous-UTC-day window: [yesterday 00:00,
+// today 00:00). One reconcile-tenant failure is already swallowed
+// internally by the reconciler — only fatal errors propagate up here.
+func runDriftReconciler(ctx context.Context, rec *billing.Reconciler) {
+	log.Printf("apiserver: drift reconciler starting, interval=24h")
+	t := time.NewTicker(24 * time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("apiserver: drift reconciler stopping")
+			return
+		case <-t.C:
+			now := time.Now().UTC()
+			yStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -1)
+			yEnd := yStart.AddDate(0, 0, 1)
+			reports, err := rec.Run(ctx, yStart, yEnd)
+			if err != nil {
+				log.Printf("apiserver: drift reconciler err=%v", err)
+				continue
+			}
+			alerted := 0
+			for _, r := range reports {
+				if r.Alerted {
+					alerted++
+				}
+			}
+			log.Printf("apiserver: drift reconciler tenants=%d alerted=%d window=%s..%s",
+				len(reports), alerted, yStart.Format(time.RFC3339), yEnd.Format(time.RFC3339))
+		}
+	}
+}
+
+// logAlerter is the in-process Alerter used by the daily reconciler.
+// It marshals (kind, fields, ts) as one JSONL line on stderr so the
+// existing log-rotation/ingestion pipeline picks the alerts up
+// unchanged. The cmd/reconciler binary has its own HTTP-POST alerter
+// for batch-cron deployments; this one is for the in-apiserver path.
+type logAlerter struct{}
+
+// Alert implements billing.Alerter. Errors from json.Marshal would only
+// happen for non-marshallable payload values; we surface them rather
+// than swallowing so the reconciler can fail-loud and a fix can land.
+func (logAlerter) Alert(_ context.Context, kind string, payload map[string]any) error {
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	payload["kind"] = kind
+	payload["ts"] = time.Now().UTC().Format(time.RFC3339)
+	buf, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("logAlerter: marshal: %w", err)
+	}
+	fmt.Fprintln(os.Stderr, string(buf))
 	return nil
 }
