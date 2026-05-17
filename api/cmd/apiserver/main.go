@@ -58,7 +58,7 @@ func main() {
 // can describe them with one log line.
 type wiring struct {
 	billing       billing.Backend
-	billingLabel  string // "stripe" | "fake"
+	billingLabel  string                 // "stripe" | "fake"
 	stripeBackend *billing.StripeBackend // non-nil only when billingLabel=="stripe"; used as StripeUsageReporter for the drift reconciler
 	portal        server.BillingPortalMinter
 	ledger        dispatcher.LedgerPoller
