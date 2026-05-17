@@ -4,6 +4,20 @@
 
 Last updated: 2026-05-17 (PM — Wave 8.2).
 
+## What we're working on right now
+
+The single most important question this doc has to answer. Updated whenever the focus shifts; the answer below is current as of the "Last updated" timestamp.
+
+| Thread | State | Owner | Blocker |
+|---|---|---|---|
+| **V0 end-to-end smoke** — onboard a test tenant via `/v1/admin/*`, mint an `owc_*` API key, submit a `triage-watch` job, see it traverse cloud → tunnel → operator → ledger → Stripe usage record | 🚧 In flight | Claude (under Rodrigo) | `OWERA_ADMIN_TOKEN` access (Fly stores digest-only; rotate or look up locally) |
+| **Production seams** (Stripe + Clerk + operator RPC + admin endpoints + Dockerfile + Fly deploy) | ✅ Shipped to `main` and live at `https://owera-agentic-api.fly.dev` | — | None |
+| **`/readyz` reports green** against the real operator plane via the tunnel | ✅ Shipped (PR #31) — boot log shows `rpc=tunnel(https://internal-rpc.owera.com)` | — | None |
+| **Admin API-key mint endpoint** (closes the last onboarding tooling-debt) | ✅ Shipped (PR #32) | — | None |
+| **Operator-plane work** (sibling repo) | ⏩ See [`owera-fleet` roadmap](https://github.com/owera/owera-fleet/blob/main/docs/roadmap.md) | — | — |
+
+> **TL;DR for "where are we at?":** Phase 3 production wire-up is done; the platform is live; we're one operator action (admin-token lookup or rotation) away from running the first SKU end-to-end on the production stack.
+
 ## Status at a glance
 
 | Wave | Scope | State |
@@ -104,3 +118,4 @@ Anything in V0-V2 is committed to. V3-V4 entries are intent, not promise.
 |---|---|---|
 | 2026-05-17 | TL (Wave 8.1) | Initial publication for T13.7 closeout; ramp matches master-plan §"SKU rollout sequence" |
 | 2026-05-17 (PM) | TL (Wave 8.2) | Status table updated: Waves 8 + 8.1 marked Shipped; new Wave 8.2 row covers production wire-up across both repos (cloud PRs #25–#32, fleet PRs #7–#11). Wave 9 gating clarified — Stripe account cleanup, `owera-cloud` repo visibility flip, and `claw-staging.local` provisioning are operator-action blockers, not engineering. See master-plan execution log for the per-PR breakdown. |
+| 2026-05-17 (later PM) | Claude (under Rodrigo) | Added "What we're working on right now" stanza at the top so the answer to "where are we at?" is on the first screen, not buried in a table. Mirrors the equivalent stanza in `owera-fleet/docs/roadmap.md` (created the same evening). |
