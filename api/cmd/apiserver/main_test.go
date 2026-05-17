@@ -61,6 +61,11 @@ func TestChooseWiring(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("STRIPE_SECRET_KEY", tc.stripeKey)
 			t.Setenv("OPERATOR_RPC_URL", tc.operatorRPCURL)
+			// Keep this matrix hermetic across the post-APE-2 env
+			// additions (CLERK_JWT_ISSUER, OWERA_DEFAULT_CAP_CENTS):
+			// the parent cases predate them, so force off here.
+			t.Setenv("CLERK_JWT_ISSUER", "")
+			t.Setenv("OWERA_DEFAULT_CAP_CENTS", "")
 
 			w, err := chooseWiring(idStore)
 			if err != nil {
@@ -101,6 +106,74 @@ func TestChooseWiring(t *testing.T) {
 			}
 			if !tc.wantPortal && w.portal != nil {
 				t.Errorf("portal minter is %T; want nil (no stripe key)", w.portal)
+			}
+		})
+	}
+}
+
+// TestChooseWiring_Clerk covers the CLERK_JWT_ISSUER env-var path.
+// Unset → clerk verifier is nil + label "disabled". Set → verifier is
+// constructed (we can't dial a real JWKS endpoint in CI, but
+// NewClerkVerifier validates the issuer string at construction and
+// only does network I/O lazily, so the wiring succeeds).
+func TestChooseWiring_Clerk(t *testing.T) {
+	idStore, err := identity.Open(":memory:")
+	if err != nil {
+		t.Fatalf("identity.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = idStore.Close() })
+
+	t.Run("unset", func(t *testing.T) {
+		t.Setenv("STRIPE_SECRET_KEY", "")
+		t.Setenv("OPERATOR_RPC_URL", "")
+		t.Setenv("CLERK_JWT_ISSUER", "")
+		w, err := chooseWiring(idStore)
+		if err != nil {
+			t.Fatalf("chooseWiring: %v", err)
+		}
+		if w.clerk != nil {
+			t.Errorf("clerk verifier = %T, want nil", w.clerk)
+		}
+		if w.clerkLabel != "disabled" {
+			t.Errorf("clerkLabel = %q, want disabled", w.clerkLabel)
+		}
+	})
+
+	t.Run("set", func(t *testing.T) {
+		t.Setenv("STRIPE_SECRET_KEY", "")
+		t.Setenv("OPERATOR_RPC_URL", "")
+		t.Setenv("CLERK_JWT_ISSUER", "https://clerk.owera.ai")
+		w, err := chooseWiring(idStore)
+		if err != nil {
+			t.Fatalf("chooseWiring: %v", err)
+		}
+		if w.clerk == nil {
+			t.Errorf("clerk verifier is nil; want non-nil")
+		}
+		if w.clerkLabel != "clerk (https://clerk.owera.ai)" {
+			t.Errorf("clerkLabel = %q", w.clerkLabel)
+		}
+	})
+}
+
+// TestDefaultCapCentsFromEnv covers the cap-from-env parse path.
+func TestDefaultCapCentsFromEnv(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+		want int64
+	}{
+		{"unset → $200 fallback", "", 20000},
+		{"valid integer", "50000", 50000},
+		{"zero is honored (no implicit cap)", "0", 0},
+		{"negative falls back", "-1", 20000},
+		{"garbage falls back", "not-a-number", 20000},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OWERA_DEFAULT_CAP_CENTS", tc.env)
+			if got := defaultCapCentsFromEnv(); got != tc.want {
+				t.Errorf("got %d, want %d", got, tc.want)
 			}
 		})
 	}
