@@ -1,0 +1,71 @@
+name: catalog-one-pr-contract
+
+# Enforce the catalog rule from EXPANDED_HERMES_AGENTIC_SERVICES_PLAN_v2.md:
+# a PR that adds a new SKU under api/internal/catalog/ must be a single-purpose
+# PR — it may not touch other core packages in the same change. This keeps the
+# blast radius of SKU additions to one file plus its test, and prevents
+# catalog changes from getting bundled with queue / jobs / dispatcher
+# refactors that would obscure the diff.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  one-pr-contract:
+    name: catalog single-purpose contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: enforce one-PR-contract
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          echo "Changed files:"
+          echo "$changed" | sed 's/^/  /'
+
+          added_skus=$(echo "$changed" | { grep -E '^api/internal/catalog/[a-z0-9_]+\.go$' || true; } \
+            | { grep -vE '_test\.go$' || true; } \
+            | { grep -vE '^api/internal/catalog/catalog\.go$' || true; })
+
+          if [ -z "$added_skus" ]; then
+            echo "No new SKU files in this PR; one-PR-contract check is a no-op."
+            exit 0
+          fi
+
+          echo "Detected SKU file(s) in this PR:"
+          echo "$added_skus" | sed 's/^/  /'
+
+          # Allowed in a catalog-only PR: any file under api/internal/catalog/,
+          # plus catalog tests, plus the openapi.yaml (since a new SKU may
+          # surface a new example), plus CHANGELOG/VERSION/docs. Disallowed:
+          # any other Go source under api/internal/ (queue, jobs, dispatcher,
+          # server, identity, auth, billing, audit, status, webhooks) and
+          # cmd/.
+          violations=$(echo "$changed" | { grep -E '^api/' || true; } | { grep -vE '^api/internal/catalog/' || true; } | { grep -vE '^api/openapi\.yaml$' || true; })
+
+          if [ -n "$violations" ]; then
+            echo
+            echo "ERROR: catalog PR touches files outside api/internal/catalog/:"
+            echo "$violations" | sed 's/^/  /'
+            echo
+            echo "A PR that adds a SKU must be single-purpose. Split this into:"
+            echo "  1. one PR adding the SKU file under api/internal/catalog/"
+            echo "  2. a separate PR for any other api/ changes"
+            echo
+            echo "See EXPANDED_HERMES_AGENTIC_SERVICES_PLAN_v2.md § catalog contract."
+            exit 1
+          fi
+
+          echo "OK: catalog PR stays within api/internal/catalog/ + openapi.yaml."
