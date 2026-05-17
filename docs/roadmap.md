@@ -2,7 +2,7 @@
 
 > **Audience: internal team + select prospects under NDA.** This is the planned ramp; it changes with demand and engineering signal. Source of truth for delivered state is the git log on `main` + the GA gates (`compliance/policies/ga-gate.md`). For the master plan (waves, workstreams, ticket backlog), see [`knowing-all-you-now-calm-leaf.md`](https://github.com/owera/owera-fleet/blob/main/knowing-all-you-now-calm-leaf.md) in the operator-plane repo.
 
-Last updated: 2026-05-17.
+Last updated: 2026-05-17 (PM — Wave 8.2).
 
 ## Status at a glance
 
@@ -10,9 +10,10 @@ Last updated: 2026-05-17.
 |---|---|---|
 | 1–6 | Operator plane (Phases 1–2) | Shipped to `owera-fleet/main` |
 | 7 | Phase-3 cloud scaffolding | Shipped to `owera-cloud/main` |
-| 8 | Phase-3 core build (WS-14, 15, 16, 17, 18, 19) | Integration PRs open; merges in flight |
-| 8.1 | Wave-8 follow-ups (PRAGMA, usage shape, user_id, this doc) | Open PRs |
-| 9 | Phase-4 launch readiness (staging fleet, drill, beta-1) | Planned |
+| 8 | Phase-3 core build (WS-14, 15, 16, 17, 18, 19) | Shipped to `owera-cloud/main` |
+| 8.1 | Wave-8 follow-ups (PRAGMA, usage shape, user_id, this doc) | Shipped |
+| 8.2 | Production wire-up: API Dockerfile + Fly deploy, Clerk JWT + admin endpoints, `/readyz` operator-plane RPC, admin API-key mint, onboarding playbook v2; on fleet side: `fleet.LedgerTail` RPC + snapshot publisher + launchd installer | Shipped |
+| 9 | Phase-4 launch readiness (staging fleet, drill, beta-1) | Planned — Stripe cleanup + repo-public flip + staging Mac are the gating operator actions |
 | 10 | Beta → GA decision | Gated on GA policy |
 | Post-GA | V2–V4 catalogue ramp | Demand-driven |
 
@@ -102,3 +103,4 @@ Anything in V0-V2 is committed to. V3-V4 entries are intent, not promise.
 | Date | Author | Change |
 |---|---|---|
 | 2026-05-17 | TL (Wave 8.1) | Initial publication for T13.7 closeout; ramp matches master-plan §"SKU rollout sequence" |
+| 2026-05-17 (PM) | TL (Wave 8.2) | Status table updated: Waves 8 + 8.1 marked Shipped; new Wave 8.2 row covers production wire-up across both repos (cloud PRs #25–#32, fleet PRs #7–#11). Wave 9 gating clarified — Stripe account cleanup, `owera-cloud` repo visibility flip, and `claw-staging.local` provisioning are operator-action blockers, not engineering. See master-plan execution log for the per-PR breakdown. |
