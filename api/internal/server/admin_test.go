@@ -238,3 +238,83 @@ func TestAdmin_ListTenants(t *testing.T) {
 		t.Errorf("count: got %d want 3 tenants=%+v", len(got.Tenants), got.Tenants)
 	}
 }
+
+// TestAdmin_SetClerkOrg — binds tenant to Clerk org id; LookupByClerkOrgID round-trips.
+func TestAdmin_SetClerkOrg(t *testing.T) {
+	h := newAdminHarness(t)
+	_, body := h.do(t, "POST", "/v1/admin/tenants", h.token, map[string]any{"name": "Acme"})
+	var tres struct{ TenantID string `json:"tenant_id"` }
+	_ = json.Unmarshal(body, &tres)
+
+	resp, _ := h.do(t, "POST", "/v1/admin/tenants/"+tres.TenantID+"/clerk-org", h.token,
+		map[string]any{"clerk_org_id": "org_test_acme"})
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("status: got %d want 204", resp.StatusCode)
+	}
+	te, err := h.idStore.LookupByClerkOrgID(context.Background(), "org_test_acme")
+	if err != nil {
+		t.Fatalf("LookupByClerkOrgID: %v", err)
+	}
+	if te.ID != tres.TenantID {
+		t.Errorf("tenant id round-trip: got %q want %q", te.ID, tres.TenantID)
+	}
+}
+
+func TestAdmin_SetClerkOrg_UnknownTenant_404(t *testing.T) {
+	h := newAdminHarness(t)
+	resp, _ := h.do(t, "POST", "/v1/admin/tenants/ten_xyz/clerk-org", h.token,
+		map[string]any{"clerk_org_id": "org_x"})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status: got %d want 404", resp.StatusCode)
+	}
+}
+
+func TestAdmin_SetClerkOrg_MissingField(t *testing.T) {
+	h := newAdminHarness(t)
+	_, body := h.do(t, "POST", "/v1/admin/tenants", h.token, map[string]any{"name": "Acme"})
+	var tres struct{ TenantID string `json:"tenant_id"` }
+	_ = json.Unmarshal(body, &tres)
+
+	resp, _ := h.do(t, "POST", "/v1/admin/tenants/"+tres.TenantID+"/clerk-org", h.token, map[string]any{})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status: got %d want 400", resp.StatusCode)
+	}
+}
+
+// TestAdmin_SetClerkUser — binds user row to Clerk subject; LookupUserByClerkUserID round-trips.
+func TestAdmin_SetClerkUser(t *testing.T) {
+	h := newAdminHarness(t)
+	_, body := h.do(t, "POST", "/v1/admin/tenants", h.token, map[string]any{"name": "Acme"})
+	var tres struct{ TenantID string `json:"tenant_id"` }
+	_ = json.Unmarshal(body, &tres)
+	_, body = h.do(t, "POST", "/v1/admin/tenants/"+tres.TenantID+"/users", h.token,
+		map[string]any{"email": "ops@acme.example"})
+	var ures struct{ UserID string `json:"user_id"` }
+	_ = json.Unmarshal(body, &ures)
+
+	resp, _ := h.do(t, "POST", "/v1/admin/tenants/"+tres.TenantID+"/users/"+ures.UserID+"/clerk-user",
+		h.token, map[string]any{"clerk_user_id": "user_test_alice"})
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("status: got %d want 204", resp.StatusCode)
+	}
+	u, err := h.idStore.LookupUserByClerkUserID(context.Background(), "user_test_alice")
+	if err != nil {
+		t.Fatalf("LookupUserByClerkUserID: %v", err)
+	}
+	if u.ID != ures.UserID {
+		t.Errorf("user id round-trip: got %q want %q", u.ID, ures.UserID)
+	}
+}
+
+func TestAdmin_SetClerkUser_UnknownUser_404(t *testing.T) {
+	h := newAdminHarness(t)
+	_, body := h.do(t, "POST", "/v1/admin/tenants", h.token, map[string]any{"name": "Acme"})
+	var tres struct{ TenantID string `json:"tenant_id"` }
+	_ = json.Unmarshal(body, &tres)
+
+	resp, _ := h.do(t, "POST", "/v1/admin/tenants/"+tres.TenantID+"/users/usr_does_not_exist/clerk-user",
+		h.token, map[string]any{"clerk_user_id": "user_x"})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status: got %d want 404", resp.StatusCode)
+	}
+}
