@@ -59,11 +59,17 @@ type TenantCustomerLookup interface {
 func New(d Deps) http.Handler {
 	r := chi.NewRouter()
 
-	// Authentication: every endpoint except /healthz, /readyz, and the
-	// public /v1/skus listing requires a Bearer api key.
+	// Authentication: every endpoint except /healthz, /readyz, the
+	// public /v1/skus listing, and the operator-only /v1/admin/* surface
+	// requires a Bearer api key. Admin paths run their own bearer-token
+	// check (see admin.go) and intentionally skip tenant-resolution since
+	// they operate above the tenant boundary.
 	skip := func(p string) bool {
 		switch p {
 		case "/healthz", "/readyz", "/v1/skus":
+			return true
+		}
+		if len(p) >= 10 && p[:10] == "/v1/admin/" {
 			return true
 		}
 		return false
@@ -111,6 +117,11 @@ func New(d Deps) http.Handler {
 	// data-deletion.md.
 	r.Delete("/v1/tenants/me/data", deleteTenantData(d))
 	r.Get("/v1/tenants/me/data/erasures/{id}", getErasure(d))
+
+	// Operator-only admin surface — tenant create, user create, set
+	// Stripe customer, set monthly cap. Guarded by OWERA_ADMIN_TOKEN.
+	// See compliance/runbooks/onboarding-playbook.md.
+	registerAdmin(r, d)
 
 	return r
 }

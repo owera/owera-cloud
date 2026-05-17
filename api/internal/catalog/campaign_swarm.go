@@ -4,16 +4,19 @@ import "context"
 
 // CampaignSwarmV1 is the V0 growth SKU that takes a campaign brief +
 // audience segment and fans out multi-channel outreach via the operator
-// plane's worker fleet. Pricing is metered: a base monthly platform fee
-// plus per-campaign overage.
+// plane's worker fleet. Pricing is per-job fixed: each campaign is a
+// discrete billable event at one of three tier prices (S/M/L), with no
+// monthly commitment. The tier the operator plane records on the bill
+// event is the StripeRef key (campaign-swarm:S / :M / :L) consulted by
+// the catalog [Dispatcher] at reconcile time.
 var CampaignSwarmV1 = &SKU{
 	Name:         "campaign-swarm",
 	Version:      "v1",
 	Category:     "growth",
 	InputsSchema: campaignSwarmSchema,
 	Pricing: PricingTier{
-		Model:       "monthly_subscription",
-		BaseCents:   99900,
+		Model:       "per_job_fixed",
+		BaseCents:   0,
 		OverageRule: "campaign",
 	},
 	SLA: SLA{
