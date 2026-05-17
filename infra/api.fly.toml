@@ -5,10 +5,19 @@
 # iad (US-East) is added when capacity demands it; for now we run gru-only
 # and rely on Vercel's gru1+iad1 for web-tier multi-region.
 #
-# Secrets (Stripe keys, operator-plane verification pubkey, etc.) are NEVER
-# checked in. They live in `fly secrets` — set them via `fly secrets set
-# KEY=VALUE -a owera-agentic-api`. See infra/secrets-manifest.md for the
-# authoritative catalogue.
+# Deploy command (run from repo root or api/):
+#
+#     cd api && fly deploy --config ../infra/api.fly.toml
+#
+# The cd makes the build context the api/ directory (Go module root);
+# --config tells fly where to find this toml. The dockerfile path
+# below resolves relative to THIS file (infra/), so ../api/Dockerfile
+# is the file fly sends to the builder.
+#
+# Secrets (Stripe keys, operator-plane URL, Clerk issuer, admin token)
+# are NEVER checked in. They live in `fly secrets` — set them via
+# `fly secrets import -a owera-agentic-api < secrets.env`. See
+# infra/secrets-manifest.md for the authoritative catalogue.
 
 app           = "owera-agentic-api"
 primary_region = "gru"
@@ -17,6 +26,18 @@ kill_timeout  = "30s"
 
 [build]
   dockerfile = "../api/Dockerfile"
+
+# Persistent SQLite database. Without this mount the DB lives inside the
+# machine's ephemeral storage and is wiped on each `fly deploy`. The
+# volume must be created once per region with:
+#
+#     fly volumes create owera_data --size 1 --region gru -a owera-agentic-api
+#
+# and chown'd to UID 65532 (distroless nonroot) on first boot — see
+# infra/README.md for the one-shot bootstrap.
+[mounts]
+  source      = "owera_data"
+  destination = "/data"
 
 [env]
   PORT          = "8080"
