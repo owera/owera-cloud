@@ -28,6 +28,12 @@ import (
 // safe to retry indefinitely.
 type Backend interface {
 	EmitUsage(ctx context.Context, ev UsageEmit) error
+	// EmitOneShot bills a single-fire charge against a Stripe customer's
+	// upcoming invoice. Used for "per-job fixed" SKUs (campaign-swarm S/M/L,
+	// app-build, research-brief, …) where each unit of work is a billable
+	// event in its own right rather than a usage increment against a
+	// monthly subscription.
+	EmitOneShot(ctx context.Context, ev OneShotEmit) error
 }
 
 // UsageEmit is the payload one EmitUsage call expects.
@@ -38,6 +44,27 @@ type UsageEmit struct {
 	Units    int64
 	Ts       time.Time
 	IdemKey  string // Stripe Idempotency-Key header value
+}
+
+// OneShotEmit is the payload one EmitOneShot call expects.
+//
+// PriceID identifies the specific tier (campaign-swarm:S/M/L). The
+// catalog lookup that selects S vs M vs L happens upstream of this
+// boundary; this layer just emits whatever it's told.
+//
+// Quantity defaults to 1 if unset; emitting Quantity=N produces a
+// single invoice item with line-total = N × PriceID.unit_amount.
+//
+// Description appears on the customer's invoice line. Keep it human:
+// "campaign-swarm M — 'Q3 product launch' (task t_abc)" not "ev_xyz".
+type OneShotEmit struct {
+	TenantID    string
+	SKU         string // e.g. "campaign-swarm@v1"
+	PriceID     string // Stripe price id (one_time)
+	Quantity    int64
+	Description string
+	Ts          time.Time
+	IdemKey     string // Stripe Idempotency-Key
 }
 
 // LedgerEvent is the minimal projection of an operator-plane ledger entry
@@ -258,8 +285,9 @@ func (s *Service) ListTenants(ctx context.Context) ([]string, error) {
 
 // FakeBackend is an in-memory Backend for tests.
 type FakeBackend struct {
-	mu      sync.Mutex
-	Records []FakeRecord
+	mu       sync.Mutex
+	Records  []FakeRecord  // EmitUsage call log
+	OneShots []FakeOneShot // EmitOneShot call log
 }
 
 // FakeRecord captures one EmitUsage call.
@@ -287,6 +315,41 @@ func (f *FakeBackend) EmitUsage(_ context.Context, ev UsageEmit) error {
 		Meter:    ev.Meter,
 		Units:    ev.Units,
 		IdemKey:  ev.IdemKey,
+	})
+	return nil
+}
+
+// FakeOneShot captures one EmitOneShot call.
+type FakeOneShot struct {
+	TenantID    string
+	SKU         string
+	PriceID     string
+	Quantity    int64
+	Description string
+	IdemKey     string
+}
+
+// EmitOneShot records the call. Idempotency dedup mirrors EmitUsage —
+// same IdemKey within the fake's lifetime is a no-op.
+func (f *FakeBackend) EmitOneShot(_ context.Context, ev OneShotEmit) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range f.OneShots {
+		if r.IdemKey == ev.IdemKey && ev.IdemKey != "" {
+			return nil
+		}
+	}
+	qty := ev.Quantity
+	if qty == 0 {
+		qty = 1
+	}
+	f.OneShots = append(f.OneShots, FakeOneShot{
+		TenantID:    ev.TenantID,
+		SKU:         ev.SKU,
+		PriceID:     ev.PriceID,
+		Quantity:    qty,
+		Description: ev.Description,
+		IdemKey:     ev.IdemKey,
 	})
 	return nil
 }
