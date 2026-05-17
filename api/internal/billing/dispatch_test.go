@@ -162,19 +162,22 @@ func TestReconcile_Dispatcher_Skip(t *testing.T) {
 	}
 }
 
-// TestReconcile_Dispatcher_ErrorAborts: a dispatcher error halts the
-// loop and returns the count emitted before the error.
-func TestReconcile_Dispatcher_ErrorAborts(t *testing.T) {
+// TestReconcile_Dispatcher_ErrorSkips: a dispatcher error on one row
+// does NOT halt the loop. The bad row stays pending (billed_at IS NULL)
+// so a future tick retries it once the StripeRef is fixed; other rows
+// in the same tick still flush. Dead-letter-tolerant invariant — a
+// single bad row must not block the queue.
+func TestReconcile_Dispatcher_ErrorSkips(t *testing.T) {
 	svc, _ := newDispatchSvc(t)
 	svc.SetDispatcher(&stubDispatcher{err: errors.New("catalog: lookup failed")})
 	recordOne(t, svc, "x@v1", "y", "e1", 1)
 
 	n, err := svc.Reconcile(context.Background())
-	if err == nil {
-		t.Fatal("expected error from dispatcher")
+	if err != nil {
+		t.Fatalf("Reconcile: unexpected error %v", err)
 	}
 	if n != 0 {
-		t.Errorf("count: got %d, want 0", n)
+		t.Errorf("emitted: got %d, want 0 (row stays pending)", n)
 	}
 }
 
