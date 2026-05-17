@@ -318,3 +318,93 @@ func TestAdmin_SetClerkUser_UnknownUser_404(t *testing.T) {
 		t.Errorf("status: got %d want 404", resp.StatusCode)
 	}
 }
+
+func TestAdmin_IssueAPIKey(t *testing.T) {
+	h := newAdminHarness(t)
+	_, body := h.do(t, "POST", "/v1/admin/tenants", h.token, map[string]any{"name": "Acme"})
+	var tres struct {
+		TenantID string `json:"tenant_id"`
+	}
+	_ = json.Unmarshal(body, &tres)
+	_, body = h.do(t, "POST", "/v1/admin/tenants/"+tres.TenantID+"/users", h.token,
+		map[string]any{"email": "ops@acme.example"})
+	var ures struct {
+		UserID string `json:"user_id"`
+	}
+	_ = json.Unmarshal(body, &ures)
+
+	resp, body := h.do(t, "POST",
+		"/v1/admin/tenants/"+tres.TenantID+"/users/"+ures.UserID+"/api-keys",
+		h.token, map[string]any{"label": "smoke"})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status: got %d want 201, body=%s", resp.StatusCode, body)
+	}
+	var got struct {
+		KeyID  string `json:"key_id"`
+		Prefix string `json:"prefix"`
+		Label  string `json:"label"`
+		Token  string `json:"token"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, body)
+	}
+	if got.Token == "" || got.KeyID == "" || got.Prefix == "" {
+		t.Fatalf("missing required field in response: %+v", got)
+	}
+	if got.Label != "smoke" {
+		t.Errorf("label want smoke, got %q", got.Label)
+	}
+	// Token must round-trip through LookupAPIKey.
+	rec, err := h.idStore.LookupAPIKey(context.Background(), got.Token)
+	if err != nil {
+		t.Fatalf("LookupAPIKey: %v", err)
+	}
+	if rec.ID != got.KeyID {
+		t.Errorf("key id mismatch: got %q want %q", rec.ID, got.KeyID)
+	}
+}
+
+func TestAdmin_IssueAPIKey_UnknownUser_404(t *testing.T) {
+	h := newAdminHarness(t)
+	_, body := h.do(t, "POST", "/v1/admin/tenants", h.token, map[string]any{"name": "Acme"})
+	var tres struct {
+		TenantID string `json:"tenant_id"`
+	}
+	_ = json.Unmarshal(body, &tres)
+
+	resp, _ := h.do(t, "POST",
+		"/v1/admin/tenants/"+tres.TenantID+"/users/usr_does_not_exist/api-keys",
+		h.token, map[string]any{})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status: got %d want 404", resp.StatusCode)
+	}
+}
+
+func TestAdmin_IssueAPIKey_DefaultLabel(t *testing.T) {
+	h := newAdminHarness(t)
+	_, body := h.do(t, "POST", "/v1/admin/tenants", h.token, map[string]any{"name": "Acme"})
+	var tres struct {
+		TenantID string `json:"tenant_id"`
+	}
+	_ = json.Unmarshal(body, &tres)
+	_, body = h.do(t, "POST", "/v1/admin/tenants/"+tres.TenantID+"/users", h.token,
+		map[string]any{"email": "ops@acme.example"})
+	var ures struct {
+		UserID string `json:"user_id"`
+	}
+	_ = json.Unmarshal(body, &ures)
+
+	resp, body := h.do(t, "POST",
+		"/v1/admin/tenants/"+tres.TenantID+"/users/"+ures.UserID+"/api-keys",
+		h.token, nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status: got %d want 201, body=%s", resp.StatusCode, body)
+	}
+	var got struct {
+		Label string `json:"label"`
+	}
+	_ = json.Unmarshal(body, &got)
+	if got.Label != "operator-issued" {
+		t.Errorf("default label want operator-issued, got %q", got.Label)
+	}
+}
