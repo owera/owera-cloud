@@ -13,13 +13,15 @@ import (
 	"github.com/stripe/stripe-go/v79/billing/meterevent"
 	"github.com/stripe/stripe-go/v79/billingportal/session"
 	"github.com/stripe/stripe-go/v79/client"
+	"github.com/stripe/stripe-go/v79/invoiceitem"
 )
 
 // CustomerResolver maps (tenant_id, sku, meter) to the Stripe customer
-// (cus_...) that the meter event should attribute usage to. WS-15
-// (identity) owns the tenant↔customer mapping; the resolver is the seam
-// across that boundary. Production wires a resolver backed by the
-// identity store; tests pass a stub.
+// (cus_...) that a billing event should attribute to. WS-15 (identity)
+// owns the tenant↔customer mapping; the resolver is the seam across
+// that boundary. EmitUsage uses the sku+meter context; EmitOneShot
+// passes empty strings for those fields since one_time prices aren't
+// meter-scoped.
 //
 // Under Stripe API ≥ 2025-03-31, metered prices bind through a Meter
 // object (customer_mapping.event_payload_key default = "stripe_customer_id")
@@ -34,9 +36,11 @@ type CustomerResolver interface {
 // missing env returns an error so the failure surfaces at startup rather
 // than at the first emit.
 //
-// EmitUsage refuses to call Stripe when the resolved customer reference is
-// a `cus_TEST_*` placeholder OR a `cus_PENDING_*` slot; this is a hard
-// guard against the live-mode key landing under a placeholder.
+// Both EmitUsage and EmitOneShot refuse to call Stripe when the resolved
+// customer reference is a `cus_TEST_*` placeholder OR a `cus_PENDING_*`
+// slot; this is a hard guard against the live-mode key landing under a
+// placeholder. EmitOneShot adds the same guard for `price_TEST_*` /
+// `price_PENDING_*` price IDs.
 type StripeBackend struct {
 	client   *client.API
 	resolver CustomerResolver
@@ -104,6 +108,60 @@ func buildMeterEventParams(ev UsageEmit, custID string, now func() time.Time) *s
 			"value":              strconv.FormatInt(ev.Units, 10),
 		},
 	}
+}
+
+// EmitOneShot creates a Stripe InvoiceItem against the tenant's
+// upcoming invoice, billing the price identified by ev.PriceID. The
+// item lands on the customer's next subscription invoice (or the next
+// manually-finalized invoice for tenants without an active subscription).
+//
+// Idempotency: Stripe's Idempotency-Key prevents duplicate items when
+// Reconcile retries between EmitOneShot success and the billed_at
+// UPDATE. The key shape is `oneshot:{tenant_id}:{entry_id}`, set by
+// the Subscriber.
+//
+// Customer resolution goes through the same CustomerResolver used by
+// EmitUsage — sku is passed for routing parity, meter is empty since
+// one_time prices are not meter-scoped.
+func (b *StripeBackend) EmitOneShot(ctx context.Context, ev OneShotEmit) error {
+	if ev.IdemKey == "" {
+		return errors.New("billing: missing idempotency key")
+	}
+	if ev.PriceID == "" {
+		return errors.New("billing: missing price_id")
+	}
+	if strings.HasPrefix(ev.PriceID, "price_TEST_") ||
+		strings.HasPrefix(ev.PriceID, "price_PENDING_") {
+		return fmt.Errorf("billing: refusing to call Stripe with placeholder price %q", ev.PriceID)
+	}
+	custID, err := b.resolver.ResolveCustomer(ctx, ev.TenantID, ev.SKU, "")
+	if err != nil {
+		return fmt.Errorf("billing: resolve customer: %w", err)
+	}
+	if custID == "" {
+		return fmt.Errorf("billing: no customer for tenant=%s (billing onboarding incomplete)", ev.TenantID)
+	}
+	if strings.HasPrefix(custID, "cus_TEST_") || strings.HasPrefix(custID, "cus_PENDING_") {
+		return fmt.Errorf("billing: refusing to call Stripe with placeholder customer %q", custID)
+	}
+	qty := ev.Quantity
+	if qty == 0 {
+		qty = 1
+	}
+	params := &stripe.InvoiceItemParams{
+		Customer: stripe.String(custID),
+		Price:    stripe.String(ev.PriceID),
+		Quantity: stripe.Int64(qty),
+	}
+	if ev.Description != "" {
+		params.Description = stripe.String(ev.Description)
+	}
+	params.SetIdempotencyKey(ev.IdemKey)
+	params.Context = ctx
+	if _, err := invoiceitem.New(params); err != nil {
+		return fmt.Errorf("billing: stripe invoice item: %w", err)
+	}
+	return nil
 }
 
 // PortalSessionURL mints a Stripe Customer Portal session for the given
