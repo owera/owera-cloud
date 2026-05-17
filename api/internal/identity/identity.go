@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -413,6 +414,9 @@ func verifySecret(secret, verifier string) (bool, error) {
 	salt, want, t, m, p, err := decodeVerifier(verifier)
 	if err != nil {
 		return false, err
+	}
+	if len(want) > math.MaxUint32 {
+		return false, fmt.Errorf("identity: verifier hash length %d exceeds uint32", len(want))
 	}
 	got := argon2.IDKey([]byte(secret), salt, t, m, p, uint32(len(want)))
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
