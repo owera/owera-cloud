@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { JobStatusBadge } from "@/components/job-status-badge";
+import { JobTimeline } from "@/components/job-timeline";
 import { api, ApiClientError } from "@/lib/api-client";
 import { duration, formatCents, shortTimestamp } from "@/lib/format";
 import type { Job, JobLedgerEntry } from "@/lib/types";
@@ -149,22 +150,7 @@ export default async function JobDetailPage({ params }: PageProps) {
           <CardTitle>LEDGER</CardTitle>
         </CardHeader>
         <CardBody>
-          <ol className="space-y-2 font-mono text-xs">
-            {ledger.map((e) => (
-              <li
-                key={e.id}
-                className="grid grid-cols-[10rem_8rem_1fr] gap-2 items-baseline"
-              >
-                <span className="text-[var(--color-muted-foreground)]">
-                  {shortTimestamp(e.ts)}
-                </span>
-                <span className="text-[var(--color-primary)] uppercase">
-                  {e.kind}
-                </span>
-                <span>{e.message}</span>
-              </li>
-            ))}
-          </ol>
+          <JobTimeline jobId={job.id} initial={ledger} live={live} />
         </CardBody>
       </Card>
 

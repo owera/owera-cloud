@@ -1,14 +1,15 @@
 # SOC 2 Common Criteria → evidence-location mapping.
 #
 # One entry per Common Criterion. The auditor uses the evidence_location to
-# pull the artifact that demonstrates control operation. status reflects our
-# self-assessment, validated quarterly by the CISO.
+# pull the artifact that demonstrates control operation; evidence_path is the
+# committed file the SOC 2 auditor reads on the audit pull (must exist).
+# status reflects our self-assessment, validated quarterly by the CISO.
 #
 # Schema is documented in README.md in this directory.
 
 framework: "AICPA SOC 2 Common Criteria (2017, revised 2022)"
 last_reviewed: "2026-05-16"
-last_reviewer: "Owera Security (initial seed)"
+last_reviewer: "Owera Security (T18.4 — evidence-path mapping pass)"
 
 controls:
   # --- CC1: Control Environment -----------------------------------------
@@ -16,6 +17,7 @@ controls:
     description: "Demonstrates commitment to integrity and ethical values."
     evidence_type: policy
     evidence_location: "compliance/policies/security-policy.md (§11 Acceptable use)"
+    evidence_path: "compliance/audit-controls/evidence/CC1.1-ethics.md"
     status: ready
     owner: CISO
 
@@ -23,6 +25,7 @@ controls:
     description: "Board of directors demonstrates independence and oversight."
     evidence_type: attestation
     evidence_location: "Owera Software Ltda board minutes (out-of-tree; in 1Password vault Owera/Governance)"
+    evidence_path: "compliance/audit-controls/evidence/CC1.2-board-oversight.md"
     status: not-started
     owner: CEO
     notes: "Pre-GA: founders + advisors only. Formalize before SOC 2 audit window."
@@ -31,6 +34,7 @@ controls:
     description: "Management establishes structures, reporting lines, authorities, and responsibilities."
     evidence_type: policy
     evidence_location: "compliance/policies/access-control-policy.md (§3 Roles)"
+    evidence_path: "compliance/audit-controls/evidence/CC1.3-org-structure.md"
     status: ready
     owner: CISO
 
@@ -38,6 +42,7 @@ controls:
     description: "Commitment to attract, develop, and retain competent individuals."
     evidence_type: attestation
     evidence_location: "HR onboarding records (training attestations); out-of-tree in HR SaaS"
+    evidence_path: "compliance/audit-controls/evidence/CC1.4-hiring-training.md"
     status: in-progress
     owner: CEO
 
@@ -45,6 +50,7 @@ controls:
     description: "Holds individuals accountable for internal control responsibilities."
     evidence_type: policy
     evidence_location: "compliance/policies/security-policy.md (§11) + HR disciplinary policy (out-of-tree)"
+    evidence_path: "compliance/audit-controls/evidence/CC1.5-accountability.md"
     status: in-progress
     owner: CISO
 
@@ -53,6 +59,7 @@ controls:
     description: "Obtains or generates relevant, quality information to support functioning of internal control."
     evidence_type: log-query
     evidence_location: "api/internal/audit/ — WORM hash-chained audit log; query by tenant_id + timeframe"
+    evidence_path: "compliance/audit-controls/evidence/CC2.1-audit-log.md"
     status: in-progress
     owner: SRE Lead
 
@@ -60,6 +67,7 @@ controls:
     description: "Internally communicates information necessary to support functioning of internal control."
     evidence_type: runbook
     evidence_location: "compliance/runbooks/on-call-runbook.md + #oncall Slack channel archive"
+    evidence_path: "compliance/audit-controls/evidence/CC2.2-internal-comms.md"
     status: ready
     owner: SRE Lead
 
@@ -67,6 +75,7 @@ controls:
     description: "Communicates with external parties about matters affecting functioning of internal control."
     evidence_type: runbook
     evidence_location: "compliance/runbooks/incident-response.md (§5 Customer comms, §6 Regulator notifications)"
+    evidence_path: "compliance/audit-controls/evidence/CC2.3-external-comms.md"
     status: ready
     owner: CISO
 
@@ -75,6 +84,7 @@ controls:
     description: "Specifies suitable objectives to enable identification and assessment of risks."
     evidence_type: policy
     evidence_location: "compliance/policies/security-policy.md (§1 Purpose, §2 Classification)"
+    evidence_path: "compliance/audit-controls/evidence/CC3.1-objectives.md"
     status: ready
     owner: CISO
 
@@ -82,6 +92,7 @@ controls:
     description: "Identifies risks to the achievement of objectives and analyzes risks."
     evidence_type: attestation
     evidence_location: "Annual risk assessment doc (out-of-tree; 1Password Owera/Compliance/risk-assessment-YYYY.md)"
+    evidence_path: "compliance/audit-controls/evidence/CC3.2-risk-assessment.md"
     status: not-started
     owner: CISO
     notes: "First formal risk assessment due Q3 2026 ahead of SOC 2 onboarding."
@@ -90,6 +101,7 @@ controls:
     description: "Considers the potential for fraud in assessing risks."
     evidence_type: attestation
     evidence_location: "Risk assessment doc (out-of-tree)"
+    evidence_path: "compliance/audit-controls/evidence/CC3.3-fraud-risk.md"
     status: not-started
     owner: CISO
 
@@ -97,6 +109,7 @@ controls:
     description: "Identifies and assesses changes that could significantly impact the system of internal control."
     evidence_type: policy
     evidence_location: "compliance/policies/change-management-policy.md"
+    evidence_path: "compliance/audit-controls/evidence/CC3.4-change-risk.md"
     status: ready
     owner: SRE Lead
 
@@ -105,6 +118,7 @@ controls:
     description: "Selects, develops, and performs ongoing and/or separate evaluations of internal control."
     evidence_type: log-query
     evidence_location: "Quarterly access reviews per access-control-policy.md §5; artifacts in compliance/audit-controls/reviews/ (created on first review)"
+    evidence_path: "compliance/audit-controls/evidence/CC4.1-quarterly-reviews.md"
     status: in-progress
     owner: CISO
 
@@ -112,6 +126,7 @@ controls:
     description: "Evaluates and communicates internal control deficiencies in a timely manner."
     evidence_type: runbook
     evidence_location: "compliance/runbooks/incident-response.md (§8 Post-mortem) + post-mortems/ directory"
+    evidence_path: "compliance/audit-controls/evidence/CC4.2-deficiency-comms.md"
     status: ready
     owner: CISO
 
@@ -119,7 +134,8 @@ controls:
   - id: CC5.1
     description: "Selects and develops control activities that contribute to mitigation of risks."
     evidence_type: policy
-    evidence_location: "compliance/policies/ (all six policy docs)"
+    evidence_location: "compliance/policies/ (all seven policy docs incl. lgpd-compliance-policy.md)"
+    evidence_path: "compliance/audit-controls/evidence/CC5.1-control-activities.md"
     status: ready
     owner: CISO
 
@@ -127,6 +143,7 @@ controls:
     description: "Selects and develops general control activities over technology."
     evidence_type: config
     evidence_location: "infra/api.fly.toml, infra/web.vercel.json, infra/dns.cloudflare.yaml, tunnel/config.example.yml"
+    evidence_path: "compliance/audit-controls/evidence/CC5.2-tech-controls.md"
     status: ready
     owner: SRE Lead
 
@@ -134,6 +151,7 @@ controls:
     description: "Deploys control activities through policies and procedures."
     evidence_type: policy
     evidence_location: "compliance/policies/change-management-policy.md (§3 CI gates)"
+    evidence_path: "compliance/audit-controls/evidence/CC5.3-procedures.md"
     status: ready
     owner: SRE Lead
 
@@ -142,6 +160,7 @@ controls:
     description: "Implements logical access controls over protected information assets."
     evidence_type: policy
     evidence_location: "compliance/policies/access-control-policy.md"
+    evidence_path: "compliance/audit-controls/evidence/CC6.1-logical-access.md"
     status: ready
     owner: SRE Lead
 
@@ -149,6 +168,7 @@ controls:
     description: "Registers and authorizes new users prior to issuing system credentials."
     evidence_type: runbook
     evidence_location: "compliance/policies/access-control-policy.md (§5 Access reviews — onboarding inclusive); HR onboarding checklist"
+    evidence_path: "compliance/audit-controls/evidence/CC6.2-user-registration.md"
     status: in-progress
     owner: SRE Lead
 
@@ -156,6 +176,7 @@ controls:
     description: "Authorizes, modifies, or removes access to data and software based on roles."
     evidence_type: log-query
     evidence_location: "api/internal/audit/ — filter by action=access-grant / access-revoke"
+    evidence_path: "compliance/audit-controls/evidence/CC6.3-role-authz.md"
     status: in-progress
     owner: SRE Lead
 
@@ -163,6 +184,7 @@ controls:
     description: "Restricts physical access to facilities and protected information assets."
     evidence_type: attestation
     evidence_location: "Mac mini gateway physical security: locked office, FileVault enabled, kensington lock. Photo evidence in 1Password Owera/Compliance/physical-security/."
+    evidence_path: "compliance/audit-controls/evidence/CC6.4-physical-access.md"
     status: in-progress
     owner: SRE Lead
     notes: "Currently a home-office gateway; consider co-location post-Series-A."
@@ -171,6 +193,7 @@ controls:
     description: "Discontinues logical and physical protections over physical assets after use."
     evidence_type: runbook
     evidence_location: "compliance/policies/access-control-policy.md (§5 Offboarding ≤24h SLA)"
+    evidence_path: "compliance/audit-controls/evidence/CC6.5-asset-disposal.md"
     status: ready
     owner: SRE Lead
 
@@ -178,6 +201,7 @@ controls:
     description: "Implements logical access security measures against threats from outside system boundaries."
     evidence_type: config
     evidence_location: "infra/web.vercel.json (security headers); infra/dns.cloudflare.yaml (CAA, DMARC, SPF); Cloudflare WAF (dashboard)"
+    evidence_path: "compliance/audit-controls/evidence/CC6.6-perimeter.md"
     status: ready
     owner: SRE Lead
 
@@ -185,6 +209,7 @@ controls:
     description: "Restricts transmission, movement, and removal of information to authorized internal and external users."
     evidence_type: policy
     evidence_location: "compliance/policies/security-policy.md (§3 Encryption, §11 Acceptable use)"
+    evidence_path: "compliance/audit-controls/evidence/CC6.7-data-movement.md"
     status: ready
     owner: CISO
 
@@ -192,6 +217,7 @@ controls:
     description: "Implements controls to prevent or detect and act upon introduction of unauthorized or malicious software."
     evidence_type: policy
     evidence_location: "compliance/policies/security-policy.md (§8 Vulnerability management); CI gitleaks/gosec/trivy"
+    evidence_path: "compliance/audit-controls/evidence/CC6.8-malware-defense.md"
     status: in-progress
     owner: SRE Lead
 
@@ -200,6 +226,7 @@ controls:
     description: "Detects and monitors changes to configurations."
     evidence_type: log-query
     evidence_location: "Git history for infra/, tunnel/, compliance/; fly releases; vercel deployments"
+    evidence_path: "compliance/audit-controls/evidence/CC7.1-config-monitoring.md"
     status: ready
     owner: SRE Lead
 
@@ -207,6 +234,7 @@ controls:
     description: "Monitors system components and operation for anomalies."
     evidence_type: log-query
     evidence_location: "Sentry org owera; Fly metrics; Cloudflare analytics; operator-plane heartbeat watchdog"
+    evidence_path: "compliance/audit-controls/evidence/CC7.2-anomaly-detection.md"
     status: in-progress
     owner: SRE Lead
 
@@ -214,6 +242,7 @@ controls:
     description: "Evaluates security events to determine whether they could result in a failure of the entity to meet its objectives."
     evidence_type: runbook
     evidence_location: "compliance/runbooks/incident-response.md (§1 severity classification)"
+    evidence_path: "compliance/audit-controls/evidence/CC7.3-security-eval.md"
     status: ready
     owner: CISO
 
@@ -221,6 +250,7 @@ controls:
     description: "Responds to identified security incidents."
     evidence_type: runbook
     evidence_location: "compliance/runbooks/incident-response.md"
+    evidence_path: "compliance/audit-controls/evidence/CC7.4-incident-response.md"
     status: ready
     owner: CISO
 
@@ -228,6 +258,7 @@ controls:
     description: "Identifies, develops, and implements activities to recover from identified security incidents."
     evidence_type: runbook
     evidence_location: "compliance/runbooks/incident-response.md (§4 Resolve, §8 Post-mortem) + infra/disaster-recovery.md"
+    evidence_path: "compliance/audit-controls/evidence/CC7.5-recovery.md"
     status: ready
     owner: CISO
 
@@ -236,6 +267,7 @@ controls:
     description: "Authorizes, designs, develops, configures, documents, tests, approves, and implements changes to infrastructure, data, software, and procedures."
     evidence_type: policy
     evidence_location: "compliance/policies/change-management-policy.md"
+    evidence_path: "compliance/audit-controls/evidence/CC8.1-change-management.md"
     status: ready
     owner: SRE Lead
 
@@ -244,6 +276,7 @@ controls:
     description: "Identifies, selects, and develops risk mitigation activities for risks arising from potential business disruptions."
     evidence_type: runbook
     evidence_location: "infra/disaster-recovery.md"
+    evidence_path: "compliance/audit-controls/evidence/CC9.1-disaster-recovery.md"
     status: ready
     owner: SRE Lead
 
@@ -251,16 +284,17 @@ controls:
     description: "Assesses and manages risks associated with vendors and business partners."
     evidence_type: policy
     evidence_location: "compliance/policies/vendor-management-policy.md"
+    evidence_path: "compliance/audit-controls/evidence/CC9.2-vendor-risk.md"
     status: ready
     owner: CISO
 
 # Coverage summary (regenerate quarterly):
-#   ready:        20
+#   ready:        21
 #   in-progress:   9
 #   not-started:   3
-#   total:        32
+#   total:        33
 coverage:
-  ready: 20
+  ready: 21
   in-progress: 9
   not-started: 3
-  total: 32
+  total: 33

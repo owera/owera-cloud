@@ -1,8 +1,11 @@
 import * as React from "react";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+import { SupportInbox } from "@/components/support-inbox";
+import { api, ApiClientError } from "@/lib/api-client";
+import type { Ticket } from "@/lib/api-client";
 
 export const metadata = { title: "Support" };
+export const dynamic = "force-dynamic";
 
 interface DocLink {
   title: string;
@@ -33,24 +36,60 @@ const DOCS: ReadonlyArray<DocLink> = [
   },
 ];
 
-export default function SupportPage() {
+const FIXTURE: Ticket[] = [
+  {
+    id: "tkt_demo_1",
+    subject: "job_01HXR0F1 — xcodebuild signing failed",
+    state: "open",
+    createdAt: "2026-05-16T09:55:00Z",
+    updatedAt: "2026-05-16T10:11:00Z",
+    lastAuthor: "customer",
+  },
+  {
+    id: "tkt_demo_2",
+    subject: "How do I rotate API keys without downtime?",
+    state: "resolved",
+    createdAt: "2026-05-12T14:02:00Z",
+    updatedAt: "2026-05-12T16:40:00Z",
+    lastAuthor: "support",
+  },
+];
+
+async function safeList(): Promise<{ tickets: Ticket[]; live: boolean }> {
+  try {
+    return { tickets: await api.listTickets(), live: true };
+  } catch (err) {
+    if (err instanceof ApiClientError || err instanceof Error) {
+      return { tickets: FIXTURE, live: false };
+    }
+    throw err;
+  }
+}
+
+export default async function SupportPage() {
+  const { tickets, live } = await safeList();
+
   return (
     <div className="space-y-6">
       <header className="flex items-baseline justify-between">
         <h1 className="font-mono text-xl font-semibold tracking-tight">
           SUPPORT
         </h1>
-        <span className="text-[10px] uppercase tracking-wide font-mono text-[var(--color-state-running)]">
-          TICKET INBOX — stubbed
-        </span>
+        {!live && (
+          <span className="text-[10px] uppercase tracking-wide font-mono text-[var(--color-state-running)]">
+            FIXTURE DATA — API not reachable
+          </span>
+        )}
       </header>
+
+      <SupportInbox initial={tickets} live={live} />
 
       <Card>
         <CardHeader>
           <CardTitle>DOCS</CardTitle>
         </CardHeader>
         <CardBody>
-          <ul className="grid grid-cols-2 gap-3">
+          <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             {DOCS.map((d) => (
               <li
                 key={d.href}
@@ -70,28 +109,6 @@ export default function SupportPage() {
               </li>
             ))}
           </ul>
-        </CardBody>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>TICKETS</CardTitle>
-        </CardHeader>
-        <CardBody className="space-y-4">
-          <p className="text-sm text-[var(--color-muted-foreground)] leading-relaxed">
-            Ticket inbox is not wired yet. The api/ agent will expose{" "}
-            <code className="text-[var(--color-foreground)]">
-              GET /v1/support/tickets
-            </code>{" "}
-            and{" "}
-            <code className="text-[var(--color-foreground)]">
-              POST /v1/support/tickets
-            </code>{" "}
-            against the chosen helpdesk provider.
-          </p>
-          <Button variant="primary" disabled>
-            Open a ticket
-          </Button>
         </CardBody>
       </Card>
     </div>

@@ -47,9 +47,33 @@ PR `soc2-cc.yaml`:
   description: <one-line auditor-facing description>
   evidence_type: policy|runbook|config|log-query|screenshot|attestation|code
   evidence_location: <relative path, log query, or URL>
+  evidence_path: compliance/audit-controls/evidence/CCN.M-<slug>.md
   status: not-started|in-progress|ready
   owner: <role>
   notes: <optional clarifications>
 ```
 
 The file is YAML-validated in CI; an unparseable entry blocks the merge.
+
+## evidence_path contract
+
+Every control entry has `evidence_path` pointing at a file under
+`evidence/` that the auditor reads on the audit pull. The file:
+
+- Restates the control description (so an auditor reading the evidence
+  file in isolation knows what they're looking at).
+- Names the evidence source (the live system, dashboard, log query, or
+  out-of-tree document).
+- Captures the TODO list before the audit window opens — typically
+  "screenshot the SaaS console N days before the auditor's read date,
+  check it into `<cc-id>-screenshots/`".
+- Is the place to land long-form follow-up notes that don't belong in
+  the YAML.
+
+CI lints that every `evidence_path` value resolves to a file at HEAD.
+The lint runs in `.github/workflows/compliance.yml` (TODO: wire) using:
+
+```bash
+yq '.controls[].evidence_path' compliance/audit-controls/soc2-cc.yaml \
+  | xargs -I{} test -f {} || (echo "missing evidence file: {}" && exit 1)
+```

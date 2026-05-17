@@ -33,7 +33,7 @@ export default async function RootPage() {
             Open dashboard
           </Link>
           <Link
-            href="/dashboard/support"
+            href="/support"
             className="inline-flex h-9 px-3 items-center rounded-md text-sm font-medium border border-[var(--color-border)] hover:bg-[var(--color-muted)] transition-colors"
           >
             Docs &amp; SKUs

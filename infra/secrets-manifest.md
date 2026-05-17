@@ -20,12 +20,13 @@ Operators reconcile this manifest against the live secret stores quarterly. Any 
 
 | Status | Name | Store | Owner | Rotation | Notes |
 |--------|------|-------|-------|----------|-------|
-| `[ ]` | `STRIPE_SECRET_KEY` | `fly`, `1password` | CFO | 180d | Live keys only in fly; test keys in 1password for staging |
+| `[ ]` | `STRIPE_SECRET_KEY` | `fly`, `1password` | CFO | 180d | Live keys only in fly; **test** keys in 1password for staging. Consumed by `api/internal/billing.StripeBackend` (UsageRecord + Portal). |
 | `[ ]` | `STRIPE_WEBHOOK_SECRET` | `fly` | CFO | 180d | Rotated together with `STRIPE_SECRET_KEY` |
-| `[ ]` | `STRIPE_RESTRICTED_KEY_REPORTING` | `fly` | CFO | 180d | Read-only key for the billing/reporting pipeline |
+| `[ ]` | `STRIPE_RESTRICTED_KEY_REPORTING` | `fly` | CFO | 180d | Read-only key for the billing/reporting pipeline. Consumed by `api/cmd/reconciler` for `usage_record_summaries` reads only. |
 | `[ ]` | `CLOUDFLARE_API_TOKEN` | `fly`, `1password` | SRE | 90d | Scoped to Zone:DNS:Edit on owera.ai zone only |
-| `[ ]` | `CLERK_SECRET_KEY` | `fly` | SRE | 180d | Or `WORKOS_API_KEY` if WorkOS wins the auth bake-off |
+| `[ ]` | `CLERK_SECRET_KEY` | `fly` | SRE | 180d | TL pinned Clerk over WorkOS for Wave-8 (WS-15); consumed by api JWT-verify path |
 | `[ ]` | `CLERK_PUBLISHABLE_KEY` | `vercel` | SRE | 180d | Public; rotated alongside the secret key |
+| `[ ]` | `CLERK_JWT_TEMPLATE_OWERA_API` | `fly` | SRE | n/a | Name of the Clerk JWT template the api recognises ("owera-api"); referenced by web/lib/auth.ts getApiToken() |
 | `[ ]` | `OPERATOR_PLANE_PUBKEY_ED25519` | `fly` | CISO | incident | The operator-plane minisign pubkey; api verifies JWS payloads with it |
 | `[ ]` | `SQLITE_ENCRYPTION_KEY` | `fly` | CISO | 365d | sqlcipher passphrase for the api-local cache; rotation requires re-encrypt migration |
 | `[ ]` | `JWT_SIGNING_KEY` | `fly` | SRE | 90d | HS512; rotated with overlap window (api accepts old + new for 24h) |
@@ -41,6 +42,15 @@ Operators reconcile this manifest against the live secret stores quarterly. Any 
 | `[ ]` | `NEXT_PUBLIC_STATUS_URL` | `vercel` | SRE | n/a | `https://status.owera.ai` |
 | `[ ]` | `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | `vercel` | SRE | 180d | Mirrors the api-tier value |
 | `[ ]` | `CLERK_SECRET_KEY` | `vercel` | SRE | 180d | Only for SSR route handlers; never shipped to client |
+| `[ ]` | `VERCEL_TOKEN` | `1password` | SRE | 90d | CI deploy token (used by `gh workflow` if/when we gate deploys; Vercel for Git handles auto-deploys without it) |
+
+## Status page (Vercel — separate project)
+
+| Status | Name | Store | Owner | Rotation | Notes |
+|--------|------|-------|-------|----------|-------|
+| `[ ]` | `NEXT_PUBLIC_SNAPSHOT_URL` | `vercel` | SRE | n/a | `https://snapshots.owera.ai/health/latest.json`; public URL of the operator-plane health snapshot |
+| `[ ]` | `SNAPSHOT_PUBLISHER_R2_ACCESS_KEY` | `keychain` | SRE | 90d | Operator-plane uses this to PUT the snapshot to the R2 bucket; not consumed by the status page itself |
+| `[ ]` | `SNAPSHOT_PUBLISHER_R2_SECRET_KEY` | `keychain` | SRE | 90d | Paired with the access key above |
 
 ## Operator-plane tunnel (Mac mini gateway)
 

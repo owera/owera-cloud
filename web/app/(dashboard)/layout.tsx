@@ -10,10 +10,11 @@ interface NavItem {
 
 const NAV: ReadonlyArray<NavItem> = [
   { href: "/dashboard", label: "OVERVIEW", hint: "Usage & recent jobs" },
-  { href: "/dashboard/jobs", label: "JOBS", hint: "Full history" },
-  { href: "/dashboard/billing", label: "BILLING", hint: "Stripe portal" },
-  { href: "/dashboard/api-keys", label: "API KEYS", hint: "Manage secrets" },
-  { href: "/dashboard/support", label: "SUPPORT", hint: "Docs & tickets" },
+  { href: "/jobs", label: "JOBS", hint: "Submit & track" },
+  { href: "/usage", label: "USAGE", hint: "Current period meter" },
+  { href: "/billing", label: "BILLING", hint: "Stripe portal" },
+  { href: "/api-keys", label: "API KEYS", hint: "Manage secrets" },
+  { href: "/support", label: "SUPPORT", hint: "Tickets & docs" },
 ];
 
 export default async function DashboardLayout({

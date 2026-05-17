@@ -36,12 +36,15 @@ func TestRegisteredRoutes(t *testing.T) {
 	sort.Strings(got)
 
 	want := []string{
+		"DELETE /v1/tenants/me/data",
 		"GET /healthz",
 		"GET /readyz",
 		"GET /v1/jobs/",
 		"GET /v1/jobs/{id}",
 		"GET /v1/skus",
+		"GET /v1/tenants/me/data/erasures/{id}",
 		"GET /v1/usage",
+		"POST /v1/billing/portal",
 		"POST /v1/jobs/",
 		"POST /v1/jobs/{id}/cancel",
 	}
