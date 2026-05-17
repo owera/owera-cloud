@@ -81,6 +81,7 @@ func registerAdmin(r chi.Router, d Deps) {
 		r.Post("/tenants/{tenantID}/cap", adminSetCap(d))
 		r.Post("/tenants/{tenantID}/clerk-org", adminSetClerkOrg(d))
 		r.Post("/tenants/{tenantID}/users/{userID}/clerk-user", adminSetClerkUser(d))
+		r.Post("/tenants/{tenantID}/users/{userID}/api-keys", adminIssueAPIKey(d))
 	})
 }
 
@@ -321,6 +322,65 @@ func adminSetClerkUser(d Deps) http.HandlerFunc {
 		}
 		recordAdminAudit(r, d, tenantID, "admin.tenant.user.set_clerk_user", req.ClerkUserID)
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+type adminIssueAPIKeyReq struct {
+	Label string `json:"label"`
+}
+
+// adminIssueAPIKey mints a new owc_-prefixed API key for a user under a
+// tenant. The plaintext token is returned exactly once in the response
+// body; only the public prefix + argon2id verifier are persisted, so
+// operators must hand the token off to the customer immediately and
+// never log it. Label is optional (defaults to "operator-issued") and
+// surfaces in the dashboard's API Keys list.
+//
+// Closes the "Future: POST /v1/admin/tenants/{id}/users/{user_id}/api-keys"
+// gap in compliance/runbooks/onboarding-playbook.md.
+func adminIssueAPIKey(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tenantID := chi.URLParam(r, "tenantID")
+		userID := chi.URLParam(r, "userID")
+
+		// GetUser is tenant-scoped: a wrong tenantID/userID combo
+		// returns ErrNotFound, which we mirror as 404.
+		if _, err := d.Identity.GetUser(r.Context(), tenantID, userID); err != nil {
+			if errors.Is(err, identity.ErrNotFound) {
+				writeErr(w, http.StatusNotFound, "user_not_found", err.Error())
+				return
+			}
+			writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+
+		var req adminIssueAPIKeyReq
+		if r.ContentLength > 0 {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
+				return
+			}
+		}
+		label := req.Label
+		if label == "" {
+			label = "operator-issued"
+		}
+
+		tok, rec, err := d.Identity.IssueAPIKey(r.Context(), tenantID, userID, label)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		recordAdminAudit(r, d, tenantID, "admin.tenant.user.issue_api_key", rec.ID)
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"key_id":     rec.ID,
+			"tenant_id":  rec.TenantID,
+			"user_id":    rec.UserID,
+			"prefix":     rec.Prefix,
+			"label":      rec.Label,
+			"created_at": rec.CreatedAt,
+			"token":      tok, // plaintext — only emitted here, never again
+		})
 	}
 }
 

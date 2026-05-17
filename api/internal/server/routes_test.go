@@ -50,6 +50,7 @@ func TestRegisteredRoutes(t *testing.T) {
 		"POST /v1/admin/tenants/{tenantID}/clerk-org",
 		"POST /v1/admin/tenants/{tenantID}/stripe-customer",
 		"POST /v1/admin/tenants/{tenantID}/users",
+		"POST /v1/admin/tenants/{tenantID}/users/{userID}/api-keys",
 		"POST /v1/admin/tenants/{tenantID}/users/{userID}/clerk-user",
 		"POST /v1/billing/portal",
 		"POST /v1/jobs/",

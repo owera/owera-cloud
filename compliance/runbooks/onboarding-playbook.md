@@ -140,8 +140,15 @@ The customer signs in to `https://app.owera.ai` with their own Clerk credentials
 
 For customers who want CLI / programmatic submission alongside the dashboard, mint an API key:
 
-- Via dashboard: customer goes to **Settings → API Keys → + Create**. Key shown once.
-- Via api directly (operator courtesy): there's no admin endpoint for issuing API keys yet — customers must use the dashboard. (Future: `POST /v1/admin/tenants/{id}/users/{user_id}/api-keys`.)
+- **Via api (operator courtesy)** — recommended for batch-CLI customers who want a key in hand before they ever log in to the dashboard:
+  ```bash
+  curl -sS -X POST https://api.owera.ai/v1/admin/tenants/$TENANT_ID/users/$USER_ID/api-keys \
+    -H "Authorization: Bearer $OWERA_ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"label":"primary"}'
+  ```
+  The response includes `token` (the plaintext `owc_*` value) **once**. Persist it in the customer's secrets manager immediately and never log it. Subsequent lookups return only the prefix.
+- **Via dashboard**: customer goes to **Settings → API Keys → + Create**. Key shown once.
 
 **Total Day-0 work: ~15 minutes per customer.** Down from 30 min (pre-admin-endpoints) and far below the V0 SLA.
 
@@ -245,10 +252,10 @@ Resolved during the Wave-8 → Wave-8.1+ → main-wire-up sequence; left here as
 - [x] ~~Manual Stripe-customer mapping~~ → `POST /v1/admin/tenants/{id}/stripe-customer` (PR #25)
 - [x] ~~Manual cap recording~~ → `POST /v1/admin/tenants/{id}/cap` (PR #25)
 - [x] ~~Clerk binding unwired~~ → `POST /v1/admin/tenants/{id}/clerk-org` + `/users/{user_id}/clerk-user` (PR #29)
+- [x] ~~Operator-issued API-key minting~~ → `POST /v1/admin/tenants/{id}/users/{user_id}/api-keys` (PR #32)
 
 Still open:
 
-- [ ] **`POST /v1/admin/tenants/{id}/users/{user_id}/api-keys`** — operator-side API-key minting so onboarding can hand the customer their key without making them log in to the dashboard first. Self-serve flow today works (customer goes to **Settings → API Keys**) but a hand-mintable key shortens TTL for batch-CLI customers.
 - [ ] **Onboarding-tracker dashboard** — replaces manual `compliance/onboarding-history/` markdown once customer count > 5.
 - [ ] **Pre-call self-serve onboarding flow** — Clerk-only signup → Stripe Checkout → auto-create tenant/user/cap via webhook. Eliminates the Day-1 kickoff for self-serve tier customers (likely V3+).
 - [ ] **Onboarding shell wrapper packaged** — the `owera-onboard.sh` snippet above could ship under `infra/scripts/` once the team is more than one person.
