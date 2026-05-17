@@ -51,10 +51,16 @@ const (
 
 // Tenant is the unit of isolation. Every other row in the system has a
 // tenant_id FK back to one of these.
+//
+// StripeCustomerID is empty until billing onboarding runs
+// [Store.SetStripeCustomerID]; once set, the Stripe-side cus_... is the
+// recipient for meter_event payloads (T16.3) and Customer Portal sessions
+// (T16.2).
 type Tenant struct {
-	ID        string
-	Name      string
-	CreatedAt time.Time
+	ID               string
+	Name             string
+	CreatedAt        time.Time
+	StripeCustomerID string
 }
 
 // User is a human (or system account) inside a tenant. Users may hold
@@ -86,19 +92,20 @@ type Store struct {
 
 // Open returns a Store backed by the SQLite database at path. Pass
 // ":memory:" for tests. The schema is migrated on every Open.
+//
+// PRAGMAs are passed via the DSN so every connection the pool opens
+// inherits them. The previous shape — `db.Exec("PRAGMA …")` after Open
+// — only set PRAGMAs on the first connection checked out; subsequent
+// pool connections used SQLite defaults (journal_mode=DELETE, no
+// busy_timeout), surfacing as SQLITE_BUSY under concurrent writes
+// (caught by the WS-14 1,000-job load test).
 func Open(path string) (*Store, error) {
 	if path == "" {
 		return nil, errors.New("identity: empty path")
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", dsnWithPragmas(path))
 	if err != nil {
 		return nil, fmt.Errorf("identity: open: %w", err)
-	}
-	// SQLite tuning for an HTTP server: WAL for concurrent readers, busy
-	// timeout so contention doesn't surface as immediate SQLITE_BUSY.
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;`); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("identity: pragma: %w", err)
 	}
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
@@ -106,6 +113,19 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// dsnWithPragmas appends the connection-level PRAGMAs required for safe
+// concurrent HTTP-server use to path. modernc.org/sqlite reads `_pragma`
+// query parameters at connection-open time, so every pooled connection
+// inherits the same settings.
+func dsnWithPragmas(path string) string {
+	const pragmas = "_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)"
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + pragmas
 }
 
 // Close releases the underlying database handle.
@@ -118,10 +138,15 @@ func (s *Store) DB() *sql.DB { return s.db }
 func (s *Store) migrate() error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS tenants (
-			id          TEXT PRIMARY KEY,
-			name        TEXT NOT NULL,
-			created_at  DATETIME NOT NULL
+			id                  TEXT PRIMARY KEY,
+			name                TEXT NOT NULL,
+			created_at          DATETIME NOT NULL,
+			stripe_customer_id  TEXT
 		)`,
+		// Idempotent column add for existing databases — SQLite does not
+		// support IF NOT EXISTS on ALTER, so the error is swallowed
+		// inside migrate via the duplicate-column check below.
+		`ALTER TABLE tenants ADD COLUMN stripe_customer_id TEXT`,
 		`CREATE TABLE IF NOT EXISTS users (
 			id          TEXT PRIMARY KEY,
 			tenant_id   TEXT NOT NULL REFERENCES tenants(id),
@@ -145,6 +170,13 @@ func (s *Store) migrate() error {
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
+			// SQLite has no IF NOT EXISTS for ALTER. Re-running the
+			// migration on a DB that already has stripe_customer_id
+			// surfaces as "duplicate column name"; swallow that one
+			// case so migrate() stays idempotent across upgrades.
+			if strings.Contains(err.Error(), "duplicate column name") {
+				continue
+			}
 			return fmt.Errorf("identity: migrate: %w (stmt=%s)", err, stmt)
 		}
 	}
@@ -173,15 +205,64 @@ func (s *Store) CreateTenant(ctx context.Context, name string) (*Tenant, error) 
 // GetTenant looks up a tenant by ID.
 func (s *Store) GetTenant(ctx context.Context, id string) (*Tenant, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id,name,created_at FROM tenants WHERE id=?`, id)
+		`SELECT id,name,created_at,COALESCE(stripe_customer_id,'') FROM tenants WHERE id=?`, id)
 	var t Tenant
-	if err := row.Scan(&t.ID, &t.Name, &t.CreatedAt); err != nil {
+	if err := row.Scan(&t.ID, &t.Name, &t.CreatedAt, &t.StripeCustomerID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("identity: get tenant: %w", err)
 	}
 	return &t, nil
+}
+
+// SetStripeCustomerID associates a Stripe customer (cus_...) with the
+// tenant. Idempotent — re-setting the same value is a no-op; switching
+// it overwrites the prior value. Onboarding (T20.1) calls this once
+// per customer after the Stripe customer is provisioned.
+func (s *Store) SetStripeCustomerID(ctx context.Context, tenantID, stripeCustomerID string) error {
+	if tenantID == "" {
+		return errors.New("identity: empty tenant_id")
+	}
+	if stripeCustomerID == "" {
+		return errors.New("identity: empty stripe_customer_id")
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE tenants SET stripe_customer_id=? WHERE id=?`,
+		stripeCustomerID, tenantID,
+	)
+	if err != nil {
+		return fmt.Errorf("identity: set stripe_customer_id: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("identity: set stripe_customer_id rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// StripeCustomerID returns the Stripe customer id bound to a tenant, or
+// the empty string if billing onboarding has not yet run for it. Empty
+// is not an error — callers downstream of billing (Customer Portal,
+// meter_event Subscriber) must short-circuit with a 503 / structured
+// "not configured" error when they see "".
+func (s *Store) StripeCustomerID(ctx context.Context, tenantID string) (string, error) {
+	if tenantID == "" {
+		return "", errors.New("identity: empty tenant_id")
+	}
+	row := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(stripe_customer_id,'') FROM tenants WHERE id=?`, tenantID)
+	var cust string
+	if err := row.Scan(&cust); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", fmt.Errorf("identity: get stripe_customer_id: %w", err)
+	}
+	return cust, nil
 }
 
 // CreateUser adds a user under a tenant.
@@ -337,11 +418,14 @@ func (s *Store) ListUsers(ctx context.Context, tenantID string) ([]*User, error)
 // ErrNotFound is returned when a lookup misses.
 var ErrNotFound = errors.New("identity: not found")
 
-// --- tenant-context helpers ---
+// --- request-context helpers ---
 
 type ctxKey int
 
-const tenantCtxKey ctxKey = 1
+const (
+	tenantCtxKey ctxKey = 1
+	userCtxKey   ctxKey = 2
+)
 
 // WithTenant returns a context that carries tenantID. The auth middleware
 // is the only intended caller; downstream handlers read it via [TenantID].
@@ -354,6 +438,22 @@ func WithTenant(ctx context.Context, tenantID string) context.Context {
 // a programming error inside an authenticated handler.
 func TenantID(ctx context.Context) string {
 	v, _ := ctx.Value(tenantCtxKey).(string)
+	return v
+}
+
+// WithUser returns a context that carries userID. The auth middleware
+// stamps this alongside [WithTenant] when the API key resolves to a user
+// (the common case); dashboard requests via Clerk eventually populate
+// this from the Clerk subject claim.
+func WithUser(ctx context.Context, userID string) context.Context {
+	return context.WithValue(ctx, userCtxKey, userID)
+}
+
+// UserID returns the user_id attached to ctx, or "" if absent. Empty is
+// not an error — it indicates the caller authenticated as a tenant-level
+// principal (e.g., a future tenant-scoped API key with no user binding).
+func UserID(ctx context.Context) string {
+	v, _ := ctx.Value(userCtxKey).(string)
 	return v
 }
 

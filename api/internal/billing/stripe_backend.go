@@ -5,33 +5,30 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	stripe "github.com/stripe/stripe-go/v79"
+	"github.com/stripe/stripe-go/v79/billing/meterevent"
 	"github.com/stripe/stripe-go/v79/billingportal/session"
 	"github.com/stripe/stripe-go/v79/client"
 	"github.com/stripe/stripe-go/v79/invoiceitem"
-	"github.com/stripe/stripe-go/v79/usagerecord"
 )
 
-// SubscriptionItemResolver resolves a (tenant_id, sku, meter) triple to the
-// Stripe SubscriptionItem ID against which usage records are posted. WS-15
-// (identity) owns the customer↔tenant mapping; the resolver is the seam
-// across that boundary. Production wires a resolver backed by the identity
-// store; tests pass a stub.
-type SubscriptionItemResolver interface {
-	ResolveSubscriptionItem(ctx context.Context, tenantID, sku, meter string) (string, error)
-}
-
-// CustomerLookup resolves a tenant_id to its Stripe customer (cus_...).
-// EmitOneShot needs the customer directly — invoice items are scoped to
-// a customer, not a subscription_item. The meter_events stack (PR #20)
-// adds a richer CustomerResolver with sku+meter routing; this slimmer
-// surface is independent of that stack so EmitOneShot can land
-// standalone.
-type CustomerLookup interface {
-	StripeCustomerID(ctx context.Context, tenantID string) (string, error)
+// CustomerResolver maps (tenant_id, sku, meter) to the Stripe customer
+// (cus_...) that a billing event should attribute to. WS-15 (identity)
+// owns the tenant↔customer mapping; the resolver is the seam across
+// that boundary. EmitUsage uses the sku+meter context; EmitOneShot
+// passes empty strings for those fields since one_time prices aren't
+// meter-scoped.
+//
+// Under Stripe API ≥ 2025-03-31, metered prices bind through a Meter
+// object (customer_mapping.event_payload_key default = "stripe_customer_id")
+// rather than a SubscriptionItem — so the resolver yields a customer
+// reference, not a subscription_item.
+type CustomerResolver interface {
+	ResolveCustomer(ctx context.Context, tenantID, sku, meter string) (string, error)
 }
 
 // StripeBackend implements [Backend] against the real Stripe API. It reads
@@ -39,65 +36,78 @@ type CustomerLookup interface {
 // missing env returns an error so the failure surfaces at startup rather
 // than at the first emit.
 //
-// EmitUsage refuses to call Stripe when the resolved Price slot is still a
-// `price_TEST_*` placeholder (see stripe_ids.go); this is a hard guard
-// against the live-mode key landing under the test-mode placeholder IDs.
+// Both EmitUsage and EmitOneShot refuse to call Stripe when the resolved
+// customer reference is a `cus_TEST_*` placeholder OR a `cus_PENDING_*`
+// slot; this is a hard guard against the live-mode key landing under a
+// placeholder. EmitOneShot adds the same guard for `price_TEST_*` /
+// `price_PENDING_*` price IDs.
 type StripeBackend struct {
-	client     *client.API
-	resolver   SubscriptionItemResolver
-	customers  CustomerLookup
+	client   *client.API
+	resolver CustomerResolver
 }
 
 // NewStripeBackend constructs the Stripe-backed Backend.
-//
-// customers is the (tenant_id) → cus_... lookup used by EmitOneShot.
-// It may be nil in dev configurations where one-shot billing is not
-// wired; EmitOneShot returns an error in that case. EmitUsage works
-// independently of customers and continues to function.
-func NewStripeBackend(resolver SubscriptionItemResolver, customers CustomerLookup) (*StripeBackend, error) {
+func NewStripeBackend(resolver CustomerResolver) (*StripeBackend, error) {
 	key := os.Getenv("STRIPE_SECRET_KEY")
 	if key == "" {
 		return nil, errors.New("billing: STRIPE_SECRET_KEY not set")
 	}
 	if resolver == nil {
-		return nil, errors.New("billing: nil SubscriptionItemResolver")
+		return nil, errors.New("billing: nil CustomerResolver")
 	}
 	c := client.New(key, nil)
-	return &StripeBackend{client: c, resolver: resolver, customers: customers}, nil
+	return &StripeBackend{client: c, resolver: resolver}, nil
 }
 
-// EmitUsage posts one Stripe UsageRecord with action=increment and the
-// Idempotency-Key carried in ev.IdemKey.
+// EmitUsage posts one Stripe billing_meter_event with event_name
+// matching the operator-plane Meter and a payload carrying the
+// resolved stripe_customer_id and the numeric value. Idempotency is
+// provided via the `identifier` field — Stripe enforces uniqueness
+// over a 24-hour rolling window keyed on the meter + event_name +
+// identifier triple.
 func (b *StripeBackend) EmitUsage(ctx context.Context, ev UsageEmit) error {
 	if ev.IdemKey == "" {
 		return errors.New("billing: missing idempotency key")
 	}
-	siID, err := b.resolver.ResolveSubscriptionItem(ctx, ev.TenantID, ev.SKU, ev.Meter)
+	if ev.Meter == "" {
+		return errors.New("billing: missing meter")
+	}
+	custID, err := b.resolver.ResolveCustomer(ctx, ev.TenantID, ev.SKU, ev.Meter)
 	if err != nil {
-		return fmt.Errorf("billing: resolve subscription_item: %w", err)
+		return fmt.Errorf("billing: resolve customer: %w", err)
 	}
-	if siID == "" {
-		return fmt.Errorf("billing: no subscription_item for tenant=%s sku=%s meter=%s", ev.TenantID, ev.SKU, ev.Meter)
+	if custID == "" {
+		return fmt.Errorf("billing: no stripe customer for tenant=%s sku=%s meter=%s", ev.TenantID, ev.SKU, ev.Meter)
 	}
-	if strings.HasPrefix(siID, "price_TEST_") || strings.HasPrefix(siID, "si_TEST_") {
-		return fmt.Errorf("billing: refusing to call Stripe with placeholder ref %q", siID)
+	if strings.HasPrefix(custID, "cus_TEST_") || strings.HasPrefix(custID, "cus_PENDING_") {
+		return fmt.Errorf("billing: refusing to call Stripe with placeholder customer ref %q", custID)
 	}
-	ts := ev.Ts.Unix()
-	if ev.Ts.IsZero() {
-		ts = time.Now().Unix()
-	}
-	params := &stripe.UsageRecordParams{
-		SubscriptionItem: stripe.String(siID),
-		Quantity:         stripe.Int64(ev.Units),
-		Timestamp:        stripe.Int64(ts),
-		Action:           stripe.String(string(stripe.UsageRecordActionIncrement)),
-	}
-	params.SetIdempotencyKey(ev.IdemKey)
+	params := buildMeterEventParams(ev, custID, time.Now)
 	params.Context = ctx
-	if _, err := usagerecord.New(params); err != nil {
-		return fmt.Errorf("billing: stripe usage record: %w", err)
+	if _, err := meterevent.New(params); err != nil {
+		return fmt.Errorf("billing: stripe meter_event: %w", err)
 	}
 	return nil
+}
+
+// buildMeterEventParams composes the BillingMeterEventParams from a
+// UsageEmit + resolved customer id. Extracted from EmitUsage so the
+// parameter shape can be unit-tested without an HTTP round trip
+// against Stripe. now is the clock the zero-Ts fallback consults.
+func buildMeterEventParams(ev UsageEmit, custID string, now func() time.Time) *stripe.BillingMeterEventParams {
+	ts := ev.Ts.Unix()
+	if ev.Ts.IsZero() {
+		ts = now().Unix()
+	}
+	return &stripe.BillingMeterEventParams{
+		EventName:  stripe.String(ev.Meter),
+		Identifier: stripe.String(ev.IdemKey),
+		Timestamp:  stripe.Int64(ts),
+		Payload: map[string]string{
+			"stripe_customer_id": custID,
+			"value":              strconv.FormatInt(ev.Units, 10),
+		},
+	}
 }
 
 // EmitOneShot creates a Stripe InvoiceItem against the tenant's
@@ -107,12 +117,12 @@ func (b *StripeBackend) EmitUsage(ctx context.Context, ev UsageEmit) error {
 //
 // Idempotency: Stripe's Idempotency-Key prevents duplicate items when
 // Reconcile retries between EmitOneShot success and the billed_at
-// UPDATE. The key shape is `oneshot:{tenant_id}:{entry_id}`, set by the
-// Subscriber.
+// UPDATE. The key shape is `oneshot:{tenant_id}:{entry_id}`, set by
+// the Subscriber.
 //
-// Refuses to call Stripe when the resolved customer or price is a
-// placeholder ref — mirroring the EmitUsage guard against the
-// live-mode key landing under placeholder IDs.
+// Customer resolution goes through the same CustomerResolver used by
+// EmitUsage — sku is passed for routing parity, meter is empty since
+// one_time prices are not meter-scoped.
 func (b *StripeBackend) EmitOneShot(ctx context.Context, ev OneShotEmit) error {
 	if ev.IdemKey == "" {
 		return errors.New("billing: missing idempotency key")
@@ -124,10 +134,7 @@ func (b *StripeBackend) EmitOneShot(ctx context.Context, ev OneShotEmit) error {
 		strings.HasPrefix(ev.PriceID, "price_PENDING_") {
 		return fmt.Errorf("billing: refusing to call Stripe with placeholder price %q", ev.PriceID)
 	}
-	if b.customers == nil {
-		return errors.New("billing: EmitOneShot not configured (CustomerLookup nil)")
-	}
-	custID, err := b.customers.StripeCustomerID(ctx, ev.TenantID)
+	custID, err := b.resolver.ResolveCustomer(ctx, ev.TenantID, ev.SKU, "")
 	if err != nil {
 		return fmt.Errorf("billing: resolve customer: %w", err)
 	}

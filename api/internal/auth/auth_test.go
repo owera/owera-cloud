@@ -169,3 +169,34 @@ func TestMiddleware_EchoesIncomingRequestID(t *testing.T) {
 		t.Fatalf("echo: got %q want req_supplied_by_caller", got)
 	}
 }
+
+// TestMiddleware_StampsUserIDFromAPIKey verifies the middleware injects
+// both tenant_id AND user_id into the request context. Pre-fix the
+// middleware only stamped tenant_id; audit rows recorded empty UserID
+// even though the API key was bound to a user. WS-18's compliance
+// trajectory needs user-level attribution.
+func TestMiddleware_StampsUserIDFromAPIKey(t *testing.T) {
+	s, tenID, tok := setup(t)
+	var seenTenant, seenUser string
+	h := Middleware(s, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenTenant = identity.TenantID(r.Context())
+		seenUser = identity.UserID(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest("GET", "/v1/jobs", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if seenTenant != tenID {
+		t.Errorf("tenant: got %q want %q", seenTenant, tenID)
+	}
+	if seenUser == "" {
+		t.Fatalf("expected non-empty user_id in context; got %q", seenUser)
+	}
+	if !strings.HasPrefix(seenUser, "usr_") {
+		t.Errorf("user_id shape: got %q want usr_-prefixed", seenUser)
+	}
+}

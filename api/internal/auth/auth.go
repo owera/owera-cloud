@@ -58,6 +58,7 @@ func Middleware(store *identity.Store, skipAuth func(path string) bool) func(htt
 				return
 			}
 			ctx := identity.WithTenant(r.Context(), key.TenantID)
+			ctx = identity.WithUser(ctx, key.UserID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

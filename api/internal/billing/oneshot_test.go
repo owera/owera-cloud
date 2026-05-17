@@ -82,77 +82,69 @@ func TestFakeBackend_OneShot_QuantityHonored(t *testing.T) {
 	}
 }
 
-// stubCustomerLookup is a minimal CustomerLookup for StripeBackend
-// negative-path tests. We can't exercise the Stripe call path in unit
-// tests without an HTTP round-trip; instead test the input-validation
-// surface and the placeholder guard.
-type stubCustomerLookup struct {
+// stubOneShotResolver is a minimal CustomerResolver for the OneShot
+// guard tests. The Stripe API path itself isn't exercised here — that's
+// covered by integration tests against test-mode Stripe.
+type stubOneShotResolver struct {
 	custID string
 	err    error
 }
 
-func (s *stubCustomerLookup) StripeCustomerID(_ context.Context, _ string) (string, error) {
+func (s *stubOneShotResolver) ResolveCustomer(_ context.Context, _, _, _ string) (string, error) {
 	return s.custID, s.err
 }
 
 // TestStripeBackend_OneShot_GuardsAndValidation covers the pre-flight
-// checks that fire before the Stripe API call. The actual API success
-// path is covered by integration tests against test-mode Stripe.
+// checks that fire before the Stripe API call.
 func TestStripeBackend_OneShot_GuardsAndValidation(t *testing.T) {
 	t.Setenv("STRIPE_SECRET_KEY", "sk_test_dummy_for_construction")
 
 	tests := []struct {
-		name    string
-		ev      OneShotEmit
-		lookup  CustomerLookup
-		wantMsg string
+		name     string
+		ev       OneShotEmit
+		resolver CustomerResolver
+		wantMsg  string
 	}{
 		{
-			name:    "missing idem key",
-			ev:      OneShotEmit{PriceID: "price_X"},
-			lookup:  &stubCustomerLookup{custID: "cus_x"},
-			wantMsg: "missing idempotency key",
+			name:     "missing idem key",
+			ev:       OneShotEmit{PriceID: "price_X"},
+			resolver: &stubOneShotResolver{custID: "cus_x"},
+			wantMsg:  "missing idempotency key",
 		},
 		{
-			name:    "missing price id",
-			ev:      OneShotEmit{IdemKey: "k"},
-			lookup:  &stubCustomerLookup{custID: "cus_x"},
-			wantMsg: "missing price_id",
+			name:     "missing price id",
+			ev:       OneShotEmit{IdemKey: "k"},
+			resolver: &stubOneShotResolver{custID: "cus_x"},
+			wantMsg:  "missing price_id",
 		},
 		{
-			name:    "placeholder price id rejected",
-			ev:      OneShotEmit{IdemKey: "k", PriceID: "price_TEST_x"},
-			lookup:  &stubCustomerLookup{custID: "cus_x"},
-			wantMsg: "placeholder price",
+			name:     "placeholder price id rejected",
+			ev:       OneShotEmit{IdemKey: "k", PriceID: "price_TEST_x"},
+			resolver: &stubOneShotResolver{custID: "cus_x"},
+			wantMsg:  "placeholder price",
 		},
 		{
-			name:    "nil customer lookup not configured",
-			ev:      OneShotEmit{IdemKey: "k", PriceID: "price_real"},
-			lookup:  nil,
-			wantMsg: "EmitOneShot not configured",
+			name:     "resolver error propagated",
+			ev:       OneShotEmit{IdemKey: "k", PriceID: "price_real", TenantID: "t"},
+			resolver: &stubOneShotResolver{err: errors.New("db unreachable")},
+			wantMsg:  "db unreachable",
 		},
 		{
-			name:    "lookup error propagated",
-			ev:      OneShotEmit{IdemKey: "k", PriceID: "price_real", TenantID: "t"},
-			lookup:  &stubCustomerLookup{err: errors.New("db unreachable")},
-			wantMsg: "db unreachable",
+			name:     "empty customer = not onboarded",
+			ev:       OneShotEmit{IdemKey: "k", PriceID: "price_real", TenantID: "t"},
+			resolver: &stubOneShotResolver{custID: ""},
+			wantMsg:  "billing onboarding incomplete",
 		},
 		{
-			name:    "empty customer = not onboarded",
-			ev:      OneShotEmit{IdemKey: "k", PriceID: "price_real", TenantID: "t"},
-			lookup:  &stubCustomerLookup{custID: ""},
-			wantMsg: "billing onboarding incomplete",
-		},
-		{
-			name:    "placeholder customer rejected",
-			ev:      OneShotEmit{IdemKey: "k", PriceID: "price_real", TenantID: "t"},
-			lookup:  &stubCustomerLookup{custID: "cus_TEST_x"},
-			wantMsg: "placeholder customer",
+			name:     "placeholder customer rejected",
+			ev:       OneShotEmit{IdemKey: "k", PriceID: "price_real", TenantID: "t"},
+			resolver: &stubOneShotResolver{custID: "cus_TEST_x"},
+			wantMsg:  "placeholder customer",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			b, err := NewStripeBackend(&stubSubItemResolver{}, tc.lookup)
+			b, err := NewStripeBackend(tc.resolver)
 			if err != nil {
 				t.Fatalf("NewStripeBackend: %v", err)
 			}
@@ -165,15 +157,6 @@ func TestStripeBackend_OneShot_GuardsAndValidation(t *testing.T) {
 			}
 		})
 	}
-}
-
-// stubSubItemResolver satisfies the legacy SubscriptionItemResolver
-// dep that NewStripeBackend still requires (until the meter_events
-// stack lands).
-type stubSubItemResolver struct{}
-
-func (s *stubSubItemResolver) ResolveSubscriptionItem(_ context.Context, _, _, _ string) (string, error) {
-	return "si_test_dummy", nil
 }
 
 func contains(haystack, needle string) bool {

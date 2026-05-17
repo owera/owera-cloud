@@ -12,44 +12,60 @@ type StripeRef struct {
 
 // StripeRefs is the V0 SKU → Stripe product/price map for the billing pipeline.
 //
-// The PriceID values prefixed `price_TEST_` are placeholders — they need to be
-// replaced once a Stripe MCP / API key bound to TEST mode is wired up (the
-// initial test-mode product creation could not complete because the only
-// available Stripe credential is in live mode; see PR body for the follow-up).
-// The ProductID values for the two services were created during T16.1 and are
-// real Stripe objects; live-mode prices were intentionally NOT attached.
+// Created 2026-05-17 in Stripe TEST mode on account acct_1TY0f6ADrWLjH4u9
+// ("Owera Fleet") via the Claude Stripe MCP. All entries below are real,
+// live-mode-safe (livemode: false on the Stripe objects). The Reconciler
+// and Subscriber may exercise these IDs end-to-end without billing risk.
 //
-// Reconciler and Subscriber must NEVER hit live prices until the placeholders
-// are replaced. The presence of `price_TEST_` is the guard.
+// triage-watch:ticket is metered against the Stripe Billing Meter
+// referenced by [MeterTriageWatchTickets] — Subscriber must emit
+// `meter_events` with event_name="tickets_processed" carrying
+// `stripe_customer_id` and `value` payload keys.
+//
+// Cleanup record:
+//   - prod_UWxqPxgISCp6QI (Owera triage-watch, Piton Tec live) — archived
+//   - prod_UWxqGIt0waFuwb (Owera campaign-swarm, Piton Tec live) — archived
+//   - prod_UX4s2ufwHsFhMV (Owera Agentic — triage-watch, Owera Fleet live
+//     misfire before test-mode was confirmed) — archived
+//   - price_1TY183ADrWLjH4u9Bvzx0Dbn (triage-watch:ticket at $0.02 — initial
+//     dashboard-instruction math error) — archived; replaced by the $2.00
+//     metered price below.
+const (
+	// MeterTriageWatchTickets is the Stripe Billing Meter ID for the
+	// tickets_processed event. Used by the Subscriber when emitting
+	// meter_events under Stripe API ≥ 2025-03-31. Event payload shape:
+	//   { "stripe_customer_id": "cus_...", "value": <ticket_count> }
+	MeterTriageWatchTickets = "mtr_test_61UhP1kSUm0YEN6dq41ADrWLjH4u9DgG"
+)
 var StripeRefs = []StripeRef{
 	{
 		OweraRef:  "triage-watch:base",
-		ProductID: "prod_UWxqPxgISCp6QI",
-		PriceID:   "price_TEST_triagewatch_base",
+		ProductID: "prod_UX51tmYQqoapDb",
+		PriceID:   "price_1TY0t6ADrWLjH4u99oBiv3pC", // $499/mo recurring licensed
 		Mode:      "test",
 	},
 	{
 		OweraRef:  "triage-watch:ticket",
-		ProductID: "prod_UWxqPxgISCp6QI",
-		PriceID:   "price_TEST_triagewatch_ticket",
+		ProductID: "prod_UX51tmYQqoapDb",
+		PriceID:   "price_1TY1BVADrWLjH4u9FmGDE6n5", // $2/ticket metered, meter=MeterTriageWatchTickets
 		Mode:      "test",
 	},
 	{
 		OweraRef:  "campaign-swarm:S",
-		ProductID: "prod_UWxqGIt0waFuwb",
-		PriceID:   "price_TEST_campaignswarm_S",
+		ProductID: "prod_UX52Sgla8ZRujL",
+		PriceID:   "price_1TY0vIADrWLjH4u9Fxi2Pdyt", // $499 one_time
 		Mode:      "test",
 	},
 	{
 		OweraRef:  "campaign-swarm:M",
-		ProductID: "prod_UWxqGIt0waFuwb",
-		PriceID:   "price_TEST_campaignswarm_M",
+		ProductID: "prod_UX52Sgla8ZRujL",
+		PriceID:   "price_1TY0vSADrWLjH4u9Thr8xXtB", // $999 one_time
 		Mode:      "test",
 	},
 	{
 		OweraRef:  "campaign-swarm:L",
-		ProductID: "prod_UWxqGIt0waFuwb",
-		PriceID:   "price_TEST_campaignswarm_L",
+		ProductID: "prod_UX52Sgla8ZRujL",
+		PriceID:   "price_1TY0vnADrWLjH4u9PPfkd7B4", // $1,999 one_time
 		Mode:      "test",
 	},
 }
