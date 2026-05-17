@@ -29,8 +29,9 @@ type SubscriptionItemResolver interface {
 // than at the first emit.
 //
 // EmitUsage refuses to call Stripe when the resolved Price slot is still a
-// `price_TEST_*` placeholder (see stripe_ids.go); this is a hard guard
-// against the live-mode key landing under the test-mode placeholder IDs.
+// `price_TEST_*` placeholder OR a `price_PENDING_*` slot (see stripe_ids.go);
+// this is a hard guard against the live-mode key landing under a placeholder
+// or pending-setup ID.
 type StripeBackend struct {
 	client   *client.API
 	resolver SubscriptionItemResolver
@@ -62,7 +63,9 @@ func (b *StripeBackend) EmitUsage(ctx context.Context, ev UsageEmit) error {
 	if siID == "" {
 		return fmt.Errorf("billing: no subscription_item for tenant=%s sku=%s meter=%s", ev.TenantID, ev.SKU, ev.Meter)
 	}
-	if strings.HasPrefix(siID, "price_TEST_") || strings.HasPrefix(siID, "si_TEST_") {
+	if strings.HasPrefix(siID, "price_TEST_") ||
+		strings.HasPrefix(siID, "si_TEST_") ||
+		strings.HasPrefix(siID, "price_PENDING_") {
 		return fmt.Errorf("billing: refusing to call Stripe with placeholder ref %q", siID)
 	}
 	ts := ev.Ts.Unix()
