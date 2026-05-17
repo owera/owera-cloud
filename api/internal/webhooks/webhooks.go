@@ -65,9 +65,9 @@ func (s *Service) Outbound(ctx context.Context, url string, payload any) error {
 	ts := strconv.FormatInt(s.now().Unix(), 10)
 	sig := signHMAC(s.outboundSecret, ts, body)
 	headers := map[string]string{
-		"Content-Type":       "application/json",
-		"X-Owera-Timestamp":  ts,
-		"X-Owera-Signature":  sig,
+		"Content-Type":      "application/json",
+		"X-Owera-Timestamp": ts,
+		"X-Owera-Signature": sig,
 	}
 	return s.sender.Send(ctx, url, body, headers)
 }
