@@ -86,19 +86,20 @@ type Store struct {
 
 // Open returns a Store backed by the SQLite database at path. Pass
 // ":memory:" for tests. The schema is migrated on every Open.
+//
+// PRAGMAs are passed via the DSN so every connection the pool opens
+// inherits them. The previous shape — `db.Exec("PRAGMA …")` after Open
+// — only set PRAGMAs on the first connection checked out; subsequent
+// pool connections used SQLite defaults (journal_mode=DELETE, no
+// busy_timeout), surfacing as SQLITE_BUSY under concurrent writes
+// (caught by the WS-14 1,000-job load test).
 func Open(path string) (*Store, error) {
 	if path == "" {
 		return nil, errors.New("identity: empty path")
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", dsnWithPragmas(path))
 	if err != nil {
 		return nil, fmt.Errorf("identity: open: %w", err)
-	}
-	// SQLite tuning for an HTTP server: WAL for concurrent readers, busy
-	// timeout so contention doesn't surface as immediate SQLITE_BUSY.
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;`); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("identity: pragma: %w", err)
 	}
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
@@ -106,6 +107,19 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// dsnWithPragmas appends the connection-level PRAGMAs required for safe
+// concurrent HTTP-server use to path. modernc.org/sqlite reads `_pragma`
+// query parameters at connection-open time, so every pooled connection
+// inherits the same settings.
+func dsnWithPragmas(path string) string {
+	const pragmas = "_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)"
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + pragmas
 }
 
 // Close releases the underlying database handle.
