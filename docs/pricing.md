@@ -33,6 +33,20 @@ The catalogue ramps in tiers. V0 ships at private beta; V1 ships at GA. V2-V4 ar
 | `triage-watch` | Subscription + overage per ticket above tier | Continuous Zendesk/helpdesk triage; categorization, draft replies, escalation to your pager when human-needed. | <2 min ticket response. |
 | `campaign-swarm` | Per-campaign tiered (S/M/L by # channels + posts) | Coordinated multi-channel launch — Twitter, LinkedIn, email — from a single brief. | ≤4-12 h depending on tier. |
 
+#### V0 reference prices (USD, billed via Stripe)
+
+These are the V0 reference prices the billing pipeline emits against. Per-customer pricing on managed contracts may vary; the **default** Stripe price slot is the one in this table.
+
+| SKU | Stripe price ref | Unit | Amount (USD cents) | Recurring? |
+|---|---|---|---|---|
+| `triage-watch` (base subscription) | `triage-watch:base` | per month | 49,900 ($499) | monthly |
+| `triage-watch` (per-ticket metered overage) | `triage-watch:ticket` | per ticket processed | 200 ($2.00) | metered (sum, monthly) |
+| `campaign-swarm` (S) | `campaign-swarm:S` | per campaign | 49,900 ($499) | per-campaign |
+| `campaign-swarm` (M) | `campaign-swarm:M` | per campaign | 99,900 ($999) | per-campaign |
+| `campaign-swarm` (L) | `campaign-swarm:L` | per campaign | 199,900 ($1,999) | per-campaign |
+
+The concrete Stripe product/price IDs (test mode + production) are recorded in `api/internal/billing/stripe_ids.go` and never appear in this document.
+
 ### V1 (general availability)
 
 Adds:

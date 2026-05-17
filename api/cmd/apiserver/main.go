@@ -79,8 +79,11 @@ func run(addr, dbPath string) error {
 		Dispatcher: disp,
 		Audit:      auditLog,
 		Billing:    billingSvc,
-		Status:     statusSvc,
-		Erasure:    erasureSvc,
+		// CostCap / BillPortal / BillCustLkp are intentionally nil in dev
+		// — production wires them once the Stripe key + WS-15 identity
+		// surfaces (StripeCustomerID + GetMonthlyCapCents) are available.
+		Status:  statusSvc,
+		Erasure: erasureSvc,
 	}
 
 	// Background dispatcher worker. The synthetic ledger poller is the

@@ -5,6 +5,7 @@ go 1.22
 require (
 	github.com/go-chi/chi/v5 v5.1.0
 	github.com/santhosh-tekuri/jsonschema/v5 v5.3.1
+	github.com/stripe/stripe-go/v79 v79.12.0
 	golang.org/x/crypto v0.27.0
 	modernc.org/sqlite v1.34.1
 )
