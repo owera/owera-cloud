@@ -354,21 +354,70 @@ func getUsage(d Deps) http.HandlerFunc {
 		if period == "" {
 			period = "current"
 		}
-		var meters map[string]int64
+		start, end := currentBillingPeriod(time.Now().UTC())
+
+		var rawJobs map[string]int64
 		if d.Billing != nil {
 			m, err := d.Billing.UsageByTenant(r.Context(), tenID)
 			if err != nil {
 				writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 				return
 			}
-			meters = m
+			rawJobs = m
 		} else {
-			meters = map[string]int64{}
+			rawJobs = map[string]int64{}
 		}
+
+		// Compose the meter map in the shape the dashboard's adaptUsage
+		// expects: per-SKU `<sku>:jobs` + `<sku>:cost_cents`, plus rolled-up
+		// `total_jobs` + `total_cost_cents`. Cost is computed from the
+		// catalog's PricingTier; billing-outbox rows carry units only.
+		meters := make(map[string]int64, len(rawJobs)*2+2)
+		var totalJobs, totalCostCents int64
+		for sku, jobs := range rawJobs {
+			meters[sku+":jobs"] = jobs
+			totalJobs += jobs
+			cost := costForSKU(sku, jobs)
+			meters[sku+":cost_cents"] = cost
+			totalCostCents += cost
+		}
+		meters["total_jobs"] = totalJobs
+		meters["total_cost_cents"] = totalCostCents
+
 		writeJSON(w, http.StatusOK, map[string]any{
-			"period": period,
-			"meters": meters,
+			"period":       period,
+			"period_start": start.Format(time.RFC3339),
+			"period_end":   end.Format(time.RFC3339),
+			"meters":       meters,
 		})
+	}
+}
+
+// currentBillingPeriod returns the [start, end] of the calendar month
+// containing now. Owera bills on calendar-month boundaries (per
+// docs/pricing.md). end is the last second of the month.
+func currentBillingPeriod(now time.Time) (start, end time.Time) {
+	start = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	end = start.AddDate(0, 1, 0).Add(-time.Second)
+	return start, end
+}
+
+// costForSKU computes the period cost for jobs of one SKU. Returns 0 for
+// unregistered SKUs (e.g., a SKU was deregistered between bill events).
+func costForSKU(sku string, jobs int64) int64 {
+	s, err := catalog.Lookup(sku)
+	if err != nil {
+		return 0
+	}
+	switch s.Pricing.Model {
+	case "metered":
+		return jobs * s.Pricing.BaseCents
+	case "monthly_subscription":
+		// Flat subscription cost regardless of job count for the period;
+		// overage rules are SKU-specific and applied by the reconciler.
+		return s.Pricing.BaseCents
+	default:
+		return 0
 	}
 }
 
