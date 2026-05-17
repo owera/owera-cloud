@@ -29,7 +29,25 @@ import (
 // (like /healthz) that should bypass authentication entirely. Every
 // request — authed, skipped, or rejected — receives an X-Request-Id and
 // has its id available via [RequestID] on the request context.
+//
+// Identical to [MiddlewareWithClerk] with a nil verifier — kept as a
+// thin wrapper so existing callers (and tests built before dual-auth
+// landed) compile unchanged.
 func Middleware(store *identity.Store, skipAuth func(path string) bool) func(http.Handler) http.Handler {
+	return MiddlewareWithClerk(store, nil, skipAuth)
+}
+
+// MiddlewareWithClerk returns an http middleware that accepts BOTH the
+// API-key bearer-token shape and the Clerk JWT shape. The dispatch rule
+// is purely syntactic on the token: tokens that begin with the Owera
+// API-key scheme (`owc_`) go through the API-key path; everything else
+// is tried against the Clerk verifier when one is configured.
+//
+// Pass clerk=nil to disable the Clerk path entirely (tokens lacking the
+// `owc_` prefix get the same "invalid api key" 401 as before this PR).
+// main.go wires a real verifier whenever CLERK_JWT_ISSUER is set in
+// the environment; dev mode without that env keeps API-key-only auth.
+func MiddlewareWithClerk(store *identity.Store, clerk ClerkAuthenticator, skipAuth func(path string) bool) func(http.Handler) http.Handler {
 	if skipAuth == nil {
 		skipAuth = func(string) bool { return false }
 	}
@@ -48,20 +66,58 @@ func Middleware(store *identity.Store, skipAuth func(path string) bool) func(htt
 				writeAuthError(w, rid, errMessage(err))
 				return
 			}
-			key, err := store.LookupAPIKey(r.Context(), tok)
-			if err != nil {
+
+			// API-key path: tokens carrying the `owc_` scheme are
+			// always tried as Owera API keys; cross-shape fallback
+			// would weaken the signal that key revocation matters.
+			if strings.HasPrefix(tok, "owc_") {
+				key, err := store.LookupAPIKey(r.Context(), tok)
+				if err != nil {
+					writeAuthError(w, rid, "invalid api key")
+					return
+				}
+				if key.RevokedAt != nil {
+					writeAuthError(w, rid, "api key revoked")
+					return
+				}
+				ctx := identity.WithTenant(r.Context(), key.TenantID)
+				ctx = identity.WithUser(ctx, key.UserID)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
+			// Clerk JWT path (dashboard requests).
+			if clerk == nil {
 				writeAuthError(w, rid, "invalid api key")
 				return
 			}
-			if key.RevokedAt != nil {
-				writeAuthError(w, rid, "api key revoked")
+			claims, err := clerk.Verify(r.Context(), tok)
+			if err != nil {
+				writeAuthError(w, rid, "invalid clerk token")
 				return
 			}
-			ctx := identity.WithTenant(r.Context(), key.TenantID)
-			ctx = identity.WithUser(ctx, key.UserID)
+			tenant, err := store.LookupByClerkOrgID(r.Context(), claims.OrgID)
+			if err != nil {
+				writeAuthError(w, rid, "unknown tenant for clerk org")
+				return
+			}
+			user, err := store.LookupUserByClerkUserID(r.Context(), claims.Subject)
+			if err != nil {
+				writeAuthError(w, rid, "unknown user for clerk subject")
+				return
+			}
+			ctx := identity.WithTenant(r.Context(), tenant.ID)
+			ctx = identity.WithUser(ctx, user.ID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// ClerkAuthenticator is the slice of *ClerkVerifier the middleware
+// actually consumes. Stated as an interface so tests can stub the
+// verifier without spinning up a full JWKS server.
+type ClerkAuthenticator interface {
+	Verify(ctx context.Context, token string) (*ClerkClaims, error)
 }
 
 // ErrMissingAuth is reported when the request has no Authorization header.
