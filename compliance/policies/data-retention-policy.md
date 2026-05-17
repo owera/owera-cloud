@@ -7,7 +7,7 @@
 | Category | Retention | Storage | Notes |
 |----------|-----------|---------|-------|
 | **Customer account metadata** (email, name, billing address, tenant id) | Lifetime of account + 90 days | Postgres via Clerk/WorkOS, mirrored to api SQLite cache | Hard-deleted on account closure + 90d grace |
-| **Customer payloads** (agent job inputs and outputs) | 30 days from job completion, OR until tenant-configured TTL (whichever is shorter) | Operator plane gateway filesystem (encrypted) | Tenant can request immediate deletion; honored within 7 days |
+| **Customer payloads** (agent job inputs and outputs) | 30 days from job completion, OR until tenant-configured TTL (whichever is shorter) | Operator plane gateway filesystem (encrypted) | Tenant can request immediate deletion; honored within 15 working days (LGPD Art. 18 §VI) |
 | **Customer billing records** (invoices, transactions) | 5 years | Stripe + api SQLite cache | Brazilian fiscal law (Receita Federal) requires 5y minimum |
 | **Audit logs** (auth events, privilege escalations, payload access) | 7 years | api WORM store (immutable, hash-chained) | SOC 2 + LGPD evidentiary need; never deletable per-tenant request |
 | **Application logs** (api / web / operator plane operational logs) | 30 days hot, 365 days cold | Fly / Vercel / operator-plane SFTP backup | Scrubbed of PII at ingest where feasible |
@@ -18,9 +18,9 @@
 
 ## 2. Deletion (LGPD Art. 18 §VI — right to deletion)
 
-Operational procedure: [`../runbooks/customer-data-deletion.md`](../runbooks/customer-data-deletion.md).
+Operational procedure: [`../runbooks/customer-data-deletion.md`](../runbooks/customer-data-deletion.md). Programmatic surface: `DELETE /v1/tenants/me/data` (see `api/internal/erasure/`); self-service in dashboard piggybacks the same endpoint.
 
-A customer's right to deletion is honored within 30 days of a verified request. The audit-log WORM store is **exempt** — audit logs containing references to the deleted tenant remain, but PII fields within audit records are tokenized (the original PII is destroyed; the tokens remain for hash-chain integrity). LGPD Art. 16 explicitly preserves this carve-out for legal-obligation retention.
+A customer's right to deletion is honored within **15 working days** of a verified request — the LGPD Art. 18 §V / Art. 19 §1 ceiling, stricter than GDPR Art. 12's 30 calendar days; one SLA satisfies both regimes. The audit-log WORM store is **exempt** from deletion — audit logs containing references to the deleted tenant remain, but PII fields within audit records are tokenized (the original PII is destroyed; the tokens remain for hash-chain integrity). LGPD Art. 16 explicitly preserves this carve-out for legal-obligation retention.
 
 Deletion is **logged** to the audit-log WORM store as a non-deletable record showing: tenant id, request date, fields scrubbed, fields preserved-under-legal-basis, operator who executed.
 
@@ -46,7 +46,7 @@ If we later discover an account belongs to a minor:
 
 ## 5. Backups vs. deletion
 
-Backups age out per the schedule above. A customer deletion request **does not** trigger a forced re-keying of restic backups — the next 30 days of daily snapshots will contain the customer's encrypted data, which then ages out naturally. The 30-day deletion SLA accommodates this: at day 30, the last snapshot containing the customer's data falls off the daily retention window.
+Backups age out per the schedule above. A customer deletion request **does not** trigger a forced re-keying of restic backups — the next ~30 days of daily snapshots will contain the customer's encrypted data, which then ages out naturally. The customer-facing 15-working-day API SLA covers the application-layer purge; the residual backup window is disclosed in the deletion-acknowledgement email and in the privacy notice.
 
 For an "urgent erasure" request (e.g. court order), the runbook covers re-keying restic to force-evict the data within 7 days.
 

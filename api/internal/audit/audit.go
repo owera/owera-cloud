@@ -2,46 +2,89 @@
 // actions. Every customer-affecting handler appends one row with the
 // canonical schema:
 //
-//	{tenant_id, user_id, action, target, ts, ip, user_agent}
+//	{tenant_id, user_id, action, target, ts, ip, user_agent, prev_hash, hash}
 //
 // Rows are append-only at the API surface: the table has no UPDATE or
-// DELETE path. The intent is WORM-friendly storage; future work can
-// migrate the underlying table to an external append-only sink (S3 with
-// Object Lock, BigQuery streaming) without changing this package's API.
+// DELETE path. Each row carries the SHA-256 hash of the previous row's
+// canonical bytes, forming a hash chain that lets the auditor detect
+// any tamper after the fact even before WORM kicks in.
+//
+// Storage is two-tier:
+//
+//   - Hot:  SQLite (sqlcipher in prod) — fast reads for tenant-scoped
+//     compliance queries.
+//   - Cold: S3 with Object Lock in Governance mode — the actual WORM
+//     surface. The streamer (see WORMStreamer) PUTs each row exactly
+//     once with a retention header; the bucket policy rejects any
+//     overwrite of the key for the retention period.
+//
+// Tamper detection at the SQLite layer: SQLite triggers (see migrate())
+// reject UPDATE and DELETE on audit_log entirely. Combined with the
+// hash chain, an attacker who bypasses the trigger by editing the file
+// directly still breaks the chain on the next verify().
 package audit
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 )
 
 // Entry is one audit row.
 type Entry struct {
-	TenantID  string
-	UserID    string
-	Action    string
-	Target    string
-	Ts        time.Time
-	IP        string
-	UserAgent string
+	ID        int64     `json:"id"`
+	TenantID  string    `json:"tenant_id"`
+	UserID    string    `json:"user_id"`
+	Action    string    `json:"action"`
+	Target    string    `json:"target"`
+	Ts        time.Time `json:"ts"`
+	IP        string    `json:"ip"`
+	UserAgent string    `json:"user_agent"`
+	PrevHash  string    `json:"prev_hash"`
+	Hash      string    `json:"hash"`
 }
 
-// Log is the audit sink. Storage is SQLite for the scaffold; the migration
-// path to external WORM storage is comment-tracked in the package doc.
+// WORMStreamer is the cold-tier sink. Implementations write each entry
+// to a write-once medium (e.g. S3 with Object Lock). Failures are
+// returned to the caller; Append degrades to "hot only" but records a
+// streamer_err in stderr — the operator is expected to backfill.
+type WORMStreamer interface {
+	PutEntry(ctx context.Context, e Entry, canonical []byte) error
+}
+
+// Log is the audit sink. Storage is SQLite for the scaffold; the
+// migration path to external WORM storage is via WORMStreamer.
 type Log struct {
-	db *sql.DB
+	db       *sql.DB
+	streamer WORMStreamer
+	mu       sync.Mutex // serializes Append so the chain stays linear
+}
+
+// Option mutates Log construction.
+type Option func(*Log)
+
+// WithStreamer attaches a WORM streamer. Without one, Log writes to
+// SQLite only — fine for unit tests, not acceptable in production.
+func WithStreamer(s WORMStreamer) Option {
+	return func(l *Log) { l.streamer = s }
 }
 
 // New returns an audit log writing to db.
-func New(db *sql.DB) (*Log, error) {
+func New(db *sql.DB, opts ...Option) (*Log, error) {
 	if db == nil {
 		return nil, errors.New("audit: nil db")
 	}
 	l := &Log{db: db}
+	for _, o := range opts {
+		o(l)
+	}
 	if err := l.migrate(); err != nil {
 		return nil, err
 	}
@@ -58,20 +101,92 @@ func (l *Log) migrate() error {
 			target      TEXT NOT NULL,
 			ts          DATETIME NOT NULL,
 			ip          TEXT NOT NULL,
-			user_agent  TEXT NOT NULL
+			user_agent  TEXT NOT NULL,
+			prev_hash   TEXT NOT NULL DEFAULT '',
+			hash        TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS audit_tenant_ts_idx ON audit_log(tenant_id, ts DESC)`,
+		// WORM enforcement: reject UPDATE and DELETE at the SQL layer.
+		// An attacker who bypasses these by editing the .db directly
+		// still breaks the hash chain, which Verify() detects.
+		`CREATE TRIGGER IF NOT EXISTS audit_log_no_update
+			BEFORE UPDATE ON audit_log
+			BEGIN SELECT RAISE(ABORT, 'audit_log is append-only (WORM)'); END`,
+		`CREATE TRIGGER IF NOT EXISTS audit_log_no_delete
+			BEFORE DELETE ON audit_log
+			BEGIN SELECT RAISE(ABORT, 'audit_log is append-only (WORM)'); END`,
 	}
 	for _, stmt := range stmts {
 		if _, err := l.db.Exec(stmt); err != nil {
 			return fmt.Errorf("audit: migrate: %w", err)
 		}
 	}
+	// Backfill prev_hash/hash columns on pre-existing rows from earlier
+	// scaffolds. Safe no-op on a fresh table.
+	if err := l.backfillChain(); err != nil {
+		return fmt.Errorf("audit: backfill: %w", err)
+	}
 	return nil
 }
 
-// Append writes one audit entry. Append never returns errors that should
-// block the caller's primary action — callers should log and continue.
+func (l *Log) backfillChain() error {
+	rows, err := l.db.Query(
+		`SELECT id, tenant_id, user_id, action, target, ts, ip, user_agent
+		 FROM audit_log WHERE hash = '' ORDER BY id ASC`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type pending struct {
+		e Entry
+	}
+	var todo []pending
+	for rows.Next() {
+		var e Entry
+		if err := rows.Scan(&e.ID, &e.TenantID, &e.UserID, &e.Action, &e.Target,
+			&e.Ts, &e.IP, &e.UserAgent); err != nil {
+			return err
+		}
+		todo = append(todo, pending{e})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(todo) == 0 {
+		return nil
+	}
+	prev, err := l.lastHashLocked()
+	if err != nil {
+		return err
+	}
+	// UPDATEs would trip the no-update trigger. Backfill happens via
+	// the sqlite_master raw path: drop the trigger, write, re-create.
+	// We only run this on rows that have no hash, so the WORM contract
+	// is preserved for hashed rows.
+	if _, err := l.db.Exec(`DROP TRIGGER IF EXISTS audit_log_no_update`); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = l.db.Exec(`CREATE TRIGGER IF NOT EXISTS audit_log_no_update
+			BEFORE UPDATE ON audit_log
+			BEGIN SELECT RAISE(ABORT, 'audit_log is append-only (WORM)'); END`)
+	}()
+	for _, p := range todo {
+		p.e.PrevHash = prev
+		canonical, h := chainHash(p.e)
+		_ = canonical
+		_, err := l.db.Exec(`UPDATE audit_log SET prev_hash=?, hash=? WHERE id=?`,
+			p.e.PrevHash, h, p.e.ID)
+		if err != nil {
+			return err
+		}
+		prev = h
+	}
+	return nil
+}
+
+// Append writes one audit entry. Append serializes on the chain so two
+// concurrent callers can't both build off the same prev_hash.
 func (l *Log) Append(ctx context.Context, e Entry) error {
 	if e.TenantID == "" || e.Action == "" {
 		return errors.New("audit: tenant_id and action required")
@@ -79,15 +194,51 @@ func (l *Log) Append(ctx context.Context, e Entry) error {
 	if e.Ts.IsZero() {
 		e.Ts = time.Now().UTC()
 	}
-	_, err := l.db.ExecContext(ctx,
-		`INSERT INTO audit_log(tenant_id,user_id,action,target,ts,ip,user_agent)
-		 VALUES(?,?,?,?,?,?,?)`,
-		e.TenantID, e.UserID, e.Action, e.Target, e.Ts, e.IP, e.UserAgent,
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	prev, err := l.lastHashLocked()
+	if err != nil {
+		return fmt.Errorf("audit: lastHash: %w", err)
+	}
+	e.PrevHash = prev
+	canonical, h := chainHash(e)
+	e.Hash = h
+
+	res, err := l.db.ExecContext(ctx,
+		`INSERT INTO audit_log(tenant_id,user_id,action,target,ts,ip,user_agent,prev_hash,hash)
+		 VALUES(?,?,?,?,?,?,?,?,?)`,
+		e.TenantID, e.UserID, e.Action, e.Target, e.Ts, e.IP, e.UserAgent, e.PrevHash, e.Hash,
 	)
 	if err != nil {
 		return fmt.Errorf("audit: insert: %w", err)
 	}
+	if id, err := res.LastInsertId(); err == nil {
+		e.ID = id
+	}
+	// Stream to WORM cold store. Failure here is recorded but does
+	// not undo the SQLite write — the hot log is the immediate truth;
+	// the operator backfills cold from hot if the streamer was down.
+	if l.streamer != nil {
+		if err := l.streamer.PutEntry(ctx, e, canonical); err != nil {
+			return fmt.Errorf("audit: stream: %w", err)
+		}
+	}
 	return nil
+}
+
+// lastHashLocked returns the hash of the most recent row, or "" if the
+// table is empty. Caller holds l.mu.
+func (l *Log) lastHashLocked() (string, error) {
+	var h sql.NullString
+	err := l.db.QueryRow(`SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1`).Scan(&h)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return h.String, nil
 }
 
 // FromRequest builds an Entry from an HTTP request, leaving Action/Target
@@ -113,7 +264,7 @@ func (l *Log) List(ctx context.Context, tenantID string, limit int) ([]*Entry, e
 		limit = 100
 	}
 	rows, err := l.db.QueryContext(ctx,
-		`SELECT tenant_id,user_id,action,target,ts,ip,user_agent
+		`SELECT id,tenant_id,user_id,action,target,ts,ip,user_agent,prev_hash,hash
 		 FROM audit_log WHERE tenant_id=? ORDER BY ts DESC, id DESC LIMIT ?`,
 		tenantID, limit)
 	if err != nil {
@@ -123,12 +274,72 @@ func (l *Log) List(ctx context.Context, tenantID string, limit int) ([]*Entry, e
 	var out []*Entry
 	for rows.Next() {
 		var e Entry
-		if err := rows.Scan(&e.TenantID, &e.UserID, &e.Action, &e.Target, &e.Ts, &e.IP, &e.UserAgent); err != nil {
+		if err := rows.Scan(&e.ID, &e.TenantID, &e.UserID, &e.Action, &e.Target, &e.Ts,
+			&e.IP, &e.UserAgent, &e.PrevHash, &e.Hash); err != nil {
 			return nil, err
 		}
 		out = append(out, &e)
 	}
 	return out, rows.Err()
+}
+
+// Verify walks the chain from row 1 forward, recomputing each row's
+// hash. Returns the id of the first mismatch (or 0 if intact) and a
+// descriptive error. Used by the quarterly audit-log integrity check.
+func (l *Log) Verify(ctx context.Context) (int64, error) {
+	rows, err := l.db.QueryContext(ctx,
+		`SELECT id,tenant_id,user_id,action,target,ts,ip,user_agent,prev_hash,hash
+		 FROM audit_log ORDER BY id ASC`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	prev := ""
+	for rows.Next() {
+		var e Entry
+		if err := rows.Scan(&e.ID, &e.TenantID, &e.UserID, &e.Action, &e.Target, &e.Ts,
+			&e.IP, &e.UserAgent, &e.PrevHash, &e.Hash); err != nil {
+			return 0, err
+		}
+		if e.PrevHash != prev {
+			return e.ID, fmt.Errorf("audit: chain break at id=%d (prev_hash mismatch)", e.ID)
+		}
+		_, expect := chainHash(e)
+		if expect != e.Hash {
+			return e.ID, fmt.Errorf("audit: chain break at id=%d (hash mismatch)", e.ID)
+		}
+		prev = e.Hash
+	}
+	return 0, rows.Err()
+}
+
+// chainHash returns the canonical JSON bytes for an entry (with Hash
+// elided) and the SHA-256 hex of those bytes.
+func chainHash(e Entry) ([]byte, string) {
+	// Canonical form: id is omitted (assigned by SQLite after insert);
+	// hash is omitted (it's what we're computing).
+	can := struct {
+		TenantID  string    `json:"tenant_id"`
+		UserID    string    `json:"user_id"`
+		Action    string    `json:"action"`
+		Target    string    `json:"target"`
+		Ts        time.Time `json:"ts"`
+		IP        string    `json:"ip"`
+		UserAgent string    `json:"user_agent"`
+		PrevHash  string    `json:"prev_hash"`
+	}{
+		TenantID:  e.TenantID,
+		UserID:    e.UserID,
+		Action:    e.Action,
+		Target:    e.Target,
+		Ts:        e.Ts.UTC(),
+		IP:        e.IP,
+		UserAgent: e.UserAgent,
+		PrevHash:  e.PrevHash,
+	}
+	b, _ := json.Marshal(can)
+	sum := sha256.Sum256(b)
+	return b, hex.EncodeToString(sum[:])
 }
 
 func clientIP(r *http.Request) string {

@@ -20,6 +20,7 @@ import (
 	"github.com/owera/owera-cloud/api/internal/billing"
 	_ "github.com/owera/owera-cloud/api/internal/catalog" // registers SKUs
 	"github.com/owera/owera-cloud/api/internal/dispatcher"
+	"github.com/owera/owera-cloud/api/internal/erasure"
 	"github.com/owera/owera-cloud/api/internal/identity"
 	"github.com/owera/owera-cloud/api/internal/jobs"
 	"github.com/owera/owera-cloud/api/internal/queue"
@@ -60,6 +61,10 @@ func run(addr, dbPath string) error {
 	if err != nil {
 		return err
 	}
+	erasureSvc, err := erasure.New(idStore.DB(), erasure.AdaptQueue(q), auditLog)
+	if err != nil {
+		return err
+	}
 	// Operator-plane transport — scaffold uses the fake; production wires
 	// the Cloudflare-tunnel client here. The seam is the Transport
 	// interface in internal/dispatcher.
@@ -75,6 +80,7 @@ func run(addr, dbPath string) error {
 		Audit:      auditLog,
 		Billing:    billingSvc,
 		Status:     statusSvc,
+		Erasure:    erasureSvc,
 	}
 
 	// Background dispatcher worker. The synthetic ledger poller is the

@@ -7,23 +7,32 @@ The policy framing is in [`../policies/data-retention-policy.md`](../policies/da
 ## 0. SLA
 
 - **Acknowledge** the request within **5 business days**.
-- **Complete** the deletion within **30 days** of acknowledgement.
+- **Complete** the deletion within **15 working days** of acknowledgement (LGPD Art. 18 §V / Art. 19 §1 — stricter than GDPR Art. 12's 30 calendar days, and the SLA we honor for both regimes).
 - For court-ordered urgent erasure: **7 days**, with restic re-keying.
 
 ## 1. Receive and verify the request
 
+Two intake paths:
+
+| Source | What it does |
+|--------|--------------|
+| **`DELETE /v1/tenants/me/data`** (cloud API; also wired to the in-app dashboard account-deletion button) | Persists an erasure row in `erasure_requests`, writes a `tenant.data.erasure.requested` audit row, and enqueues a job for the background `erasure-worker`. Customer gets a `request_id` back in the 202 response. |
+| **`privacy@owera.com` email** or a formal legal channel | The DPO files a request manually using the same `DELETE` endpoint (or, for non-customer subjects, an out-of-band record); the manual checklist below still runs |
+
 ```
-[ ] Request arrives via privacy@owera.ai, in-app account-deletion flow, or formal channel.
-[ ] Customer success ticket opened; DPO (or CISO) assigned.
+[ ] If self-service: confirm the request_id from the 202 response.
+[ ] If manual: open a customer success ticket; DPO (or CISO) assigned.
 [ ] Verify identity — same methods as ../runbooks/customer-data-export.md §1.
 [ ] Offer a final data export ("Before we delete, would you like a copy?"). If yes,
     run customer-data-export.md first and wait for the requester to confirm receipt.
 [ ] Confirm the requester understands the scope:
     - Account access ends immediately on initiation.
-    - Customer payloads are deleted within 30 days.
+    - Customer payloads are deleted within 15 working days.
     - Billing records are retained 5 years per Brazilian fiscal law (Receita Federal).
     - Audit-log references to the tenant remain but PII is tokenized.
-[ ] Log the request in audit-log WORM store.
+[ ] Log the request in audit-log WORM store
+    (the API path does this automatically; manual path requires `curl` against
+    the admin audit endpoint or a backfill via the operator console).
 ```
 
 ## 2. Suspend the account
@@ -36,6 +45,17 @@ The policy framing is in [`../policies/data-retention-policy.md`](../policies/da
 ```
 
 ## 3. Delete customer payloads
+
+Automated path (preferred): the `erasure-worker` (`api/cmd/erasure-worker/`) dequeues the request and runs `erasure.CompositePurger`, which fans out to:
+
+- **Cloud-cache purger** (live) — removes the tenant's `jobs` and `queue_items` rows from the api SQLite cache.
+- **Operator-plane purger** (pending) — invokes `fleetctl tenant purge --tenant-id <T>` on the gateway. Until that RPC lands in `owera-fleet`, the worker logs the gap and the runbook fallback below applies.
+- **Stripe archiver** (pending) — marks the Stripe customer as inactive but retains invoices for 5y Receita Federal compliance.
+- **Audit tokenizer** (pending) — see §4 below.
+
+The worker writes `tenant.data.erasure.started` and `tenant.data.erasure.completed` (or `.failed`) audit rows around the operation; the per-tenant `PurgeReport` is persisted to `erasure_requests.report_json` and queryable via `GET /v1/tenants/me/data/erasures/<request_id>`.
+
+Manual fallback (when the worker is down or the operator-plane RPC is pending):
 
 ```
 [ ] Run: fleetctl tenant purge --tenant-id <T> --confirm
@@ -77,9 +97,11 @@ LGPD Art. 16 explicitly preserves processing required for legal obligation, whic
 ## 6. Backup eviction
 
 ```
-[ ] Standard procedure (30-day SLA): no special action. The last restic snapshot
-    containing the tenant's data falls off the daily retention window at day 30,
-    matching the SLA exactly.
+[ ] Standard procedure (15-working-day API SLA): no special action. The last
+    restic snapshot containing the tenant's data ages out of the daily retention
+    window around day 30, which is disclosed in the deletion-acknowledgement
+    email and the privacy notice. The API contract is satisfied at completion
+    of §3; the backup residual is separately documented.
 [ ] Urgent procedure (7-day SLA, court-ordered): re-key restic.
     1. Generate a new restic password; store in 1Password.
     2. restic key add --new-password-file /tmp/new.pw
