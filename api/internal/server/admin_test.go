@@ -16,8 +16,8 @@ import (
 // admingHarness wires identity + audit. No tenant-auth machinery needed
 // — admin routes bypass it.
 type adminHarness struct {
-	srv    *httptest.Server
-	token  string
+	srv     *httptest.Server
+	token   string
 	idStore *identity.Store
 	audit   *audit.Log
 }
@@ -140,7 +140,9 @@ func TestAdmin_CreateUser(t *testing.T) {
 	h := newAdminHarness(t)
 	// First create tenant.
 	_, body := h.do(t, "POST", "/v1/admin/tenants", h.token, map[string]any{"name": "Acme"})
-	var tres struct{ TenantID string `json:"tenant_id"` }
+	var tres struct {
+		TenantID string `json:"tenant_id"`
+	}
 	_ = json.Unmarshal(body, &tres)
 
 	resp, body := h.do(t, "POST", "/v1/admin/tenants/"+tres.TenantID+"/users", h.token,
@@ -172,7 +174,9 @@ func TestAdmin_CreateUser_UnknownTenant_404(t *testing.T) {
 func TestAdmin_SetStripeCustomer(t *testing.T) {
 	h := newAdminHarness(t)
 	_, body := h.do(t, "POST", "/v1/admin/tenants", h.token, map[string]any{"name": "Acme"})
-	var tres struct{ TenantID string `json:"tenant_id"` }
+	var tres struct {
+		TenantID string `json:"tenant_id"`
+	}
 	_ = json.Unmarshal(body, &tres)
 
 	resp, _ := h.do(t, "POST", "/v1/admin/tenants/"+tres.TenantID+"/stripe-customer", h.token,
@@ -203,7 +207,9 @@ func TestAdmin_SetStripeCustomer_UnknownTenant_404(t *testing.T) {
 func TestAdmin_SetCap(t *testing.T) {
 	h := newAdminHarness(t)
 	_, body := h.do(t, "POST", "/v1/admin/tenants", h.token, map[string]any{"name": "Acme"})
-	var tres struct{ TenantID string `json:"tenant_id"` }
+	var tres struct {
+		TenantID string `json:"tenant_id"`
+	}
 	_ = json.Unmarshal(body, &tres)
 
 	resp, _ := h.do(t, "POST", "/v1/admin/tenants/"+tres.TenantID+"/cap", h.token,
@@ -243,7 +249,9 @@ func TestAdmin_ListTenants(t *testing.T) {
 func TestAdmin_SetClerkOrg(t *testing.T) {
 	h := newAdminHarness(t)
 	_, body := h.do(t, "POST", "/v1/admin/tenants", h.token, map[string]any{"name": "Acme"})
-	var tres struct{ TenantID string `json:"tenant_id"` }
+	var tres struct {
+		TenantID string `json:"tenant_id"`
+	}
 	_ = json.Unmarshal(body, &tres)
 
 	resp, _ := h.do(t, "POST", "/v1/admin/tenants/"+tres.TenantID+"/clerk-org", h.token,
@@ -272,7 +280,9 @@ func TestAdmin_SetClerkOrg_UnknownTenant_404(t *testing.T) {
 func TestAdmin_SetClerkOrg_MissingField(t *testing.T) {
 	h := newAdminHarness(t)
 	_, body := h.do(t, "POST", "/v1/admin/tenants", h.token, map[string]any{"name": "Acme"})
-	var tres struct{ TenantID string `json:"tenant_id"` }
+	var tres struct {
+		TenantID string `json:"tenant_id"`
+	}
 	_ = json.Unmarshal(body, &tres)
 
 	resp, _ := h.do(t, "POST", "/v1/admin/tenants/"+tres.TenantID+"/clerk-org", h.token, map[string]any{})
@@ -285,11 +295,15 @@ func TestAdmin_SetClerkOrg_MissingField(t *testing.T) {
 func TestAdmin_SetClerkUser(t *testing.T) {
 	h := newAdminHarness(t)
 	_, body := h.do(t, "POST", "/v1/admin/tenants", h.token, map[string]any{"name": "Acme"})
-	var tres struct{ TenantID string `json:"tenant_id"` }
+	var tres struct {
+		TenantID string `json:"tenant_id"`
+	}
 	_ = json.Unmarshal(body, &tres)
 	_, body = h.do(t, "POST", "/v1/admin/tenants/"+tres.TenantID+"/users", h.token,
 		map[string]any{"email": "ops@acme.example"})
-	var ures struct{ UserID string `json:"user_id"` }
+	var ures struct {
+		UserID string `json:"user_id"`
+	}
 	_ = json.Unmarshal(body, &ures)
 
 	resp, _ := h.do(t, "POST", "/v1/admin/tenants/"+tres.TenantID+"/users/"+ures.UserID+"/clerk-user",
@@ -309,7 +323,9 @@ func TestAdmin_SetClerkUser(t *testing.T) {
 func TestAdmin_SetClerkUser_UnknownUser_404(t *testing.T) {
 	h := newAdminHarness(t)
 	_, body := h.do(t, "POST", "/v1/admin/tenants", h.token, map[string]any{"name": "Acme"})
-	var tres struct{ TenantID string `json:"tenant_id"` }
+	var tres struct {
+		TenantID string `json:"tenant_id"`
+	}
 	_ = json.Unmarshal(body, &tres)
 
 	resp, _ := h.do(t, "POST", "/v1/admin/tenants/"+tres.TenantID+"/users/usr_does_not_exist/clerk-user",

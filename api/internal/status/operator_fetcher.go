@@ -22,10 +22,10 @@ type OperatorTransport interface {
 // operatorHealthSnapshot mirrors the wire shape returned by the operator
 // plane. Kept private — the public seam is [Snapshot].
 type operatorHealthSnapshot struct {
-	Ts             string                  `json:"ts"`
-	Gateway        operatorGatewayHealth   `json:"gateway"`
-	Workers        []operatorWorkerHealth  `json:"workers"`
-	SKUConformance []operatorSKUConform    `json:"sku_conformance"`
+	Ts             string                 `json:"ts"`
+	Gateway        operatorGatewayHealth  `json:"gateway"`
+	Workers        []operatorWorkerHealth `json:"workers"`
+	SKUConformance []operatorSKUConform   `json:"sku_conformance"`
 }
 
 type operatorGatewayHealth struct {
@@ -90,7 +90,7 @@ func translate(op operatorHealthSnapshot) *Snapshot {
 			ready++
 		}
 	}
-	state := "red"
+	var state string
 	switch {
 	case !op.Gateway.OK || total == 0:
 		state = "red"

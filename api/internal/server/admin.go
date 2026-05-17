@@ -26,7 +26,7 @@ import (
 // AdminTokenEnv is the environment variable the admin middleware reads
 // at request time. Reading per-request (not at startup) lets ops rotate
 // the token without restarting the api server.
-const AdminTokenEnv = "OWERA_ADMIN_TOKEN"
+const AdminTokenEnv = "OWERA_ADMIN_TOKEN" // #nosec G101 -- env-var name, not a credential
 
 // adminMiddleware authorises requests carrying `Authorization: Bearer
 // <OWERA_ADMIN_TOKEN>`. Fails closed: missing env → 503 "admin disabled".

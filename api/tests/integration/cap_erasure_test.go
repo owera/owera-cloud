@@ -162,7 +162,7 @@ func newFullHarness(t *testing.T, capCents int64) *fullHarness {
 // The cap is set to $50 and the SKU costs $100/job — first submit should
 // be rejected (estimate exceeds remaining headroom).
 func TestIntegration_CostCapBlocksSubmit(t *testing.T) {
-	h := newFullHarness(t, 50_000) // $500 default cap (not the trigger; per-tenant overrides win)
+	h := newFullHarness(t, 50_000)            // $500 default cap (not the trigger; per-tenant overrides win)
 	h.caps.centsPerTenant[h.tenantID] = 5_000 // $50/month — below the $100 per-job estimate
 
 	resp, body := h.do(t, "POST", "/v1/jobs", map[string]any{
