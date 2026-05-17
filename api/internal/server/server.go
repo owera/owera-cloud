@@ -192,7 +192,7 @@ func postJob(d Deps) http.HandlerFunc {
 			_ = err
 		}
 		if d.Audit != nil {
-			_ = d.Audit.Append(r.Context(), audit.FromRequest(r, tenID, "", "job.submit", j.ID))
+			_ = d.Audit.Append(r.Context(), audit.FromRequest(r, tenID, identity.UserID(r.Context()), "job.submit", j.ID))
 		}
 		writeJSON(w, http.StatusAccepted, jobCreateResp{JobID: j.ID, Status: string(jobs.StatusQueued)})
 	}
@@ -268,7 +268,7 @@ func cancelJob(d Deps) http.HandlerFunc {
 			return
 		}
 		if d.Audit != nil {
-			_ = d.Audit.Append(r.Context(), audit.FromRequest(r, tenID, "", "job.cancel", j.ID))
+			_ = d.Audit.Append(r.Context(), audit.FromRequest(r, tenID, identity.UserID(r.Context()), "job.cancel", j.ID))
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 	}
@@ -341,7 +341,7 @@ func postBillingPortal(d Deps) http.HandlerFunc {
 			return
 		}
 		if d.Audit != nil {
-			_ = d.Audit.Append(r.Context(), audit.FromRequest(r, tenID, "", "billing.portal.open", custID))
+			_ = d.Audit.Append(r.Context(), audit.FromRequest(r, tenID, identity.UserID(r.Context()), "billing.portal.open", custID))
 		}
 		writeJSON(w, http.StatusOK, billingPortalResp{URL: url})
 	}
@@ -432,12 +432,11 @@ func deleteTenantData(d Deps) http.HandlerFunc {
 			writeErr(w, http.StatusServiceUnavailable, "unavailable", "erasure service not configured")
 			return
 		}
-		// auth.Middleware only stamps tenant_id today; user_id will
-		// land when WS-15 extends the identity context. Until then
-		// the audit row carries an empty user_id for self-service
-		// erasures (still attributable via api_key prefix in the
-		// auth log).
-		userID := ""
+		// auth.Middleware stamps both tenant_id and user_id from the
+		// API key binding. When the request comes via the dashboard
+		// (Clerk session) the same context carries the Clerk subject
+		// as user_id after the dual-auth wiring lands.
+		userID := identity.UserID(r.Context())
 		ip := ""
 		ua := r.UserAgent()
 		if xf := r.Header.Get("X-Forwarded-For"); xf != "" {

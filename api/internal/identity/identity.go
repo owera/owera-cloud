@@ -351,11 +351,14 @@ func (s *Store) ListUsers(ctx context.Context, tenantID string) ([]*User, error)
 // ErrNotFound is returned when a lookup misses.
 var ErrNotFound = errors.New("identity: not found")
 
-// --- tenant-context helpers ---
+// --- request-context helpers ---
 
 type ctxKey int
 
-const tenantCtxKey ctxKey = 1
+const (
+	tenantCtxKey ctxKey = 1
+	userCtxKey   ctxKey = 2
+)
 
 // WithTenant returns a context that carries tenantID. The auth middleware
 // is the only intended caller; downstream handlers read it via [TenantID].
@@ -368,6 +371,22 @@ func WithTenant(ctx context.Context, tenantID string) context.Context {
 // a programming error inside an authenticated handler.
 func TenantID(ctx context.Context) string {
 	v, _ := ctx.Value(tenantCtxKey).(string)
+	return v
+}
+
+// WithUser returns a context that carries userID. The auth middleware
+// stamps this alongside [WithTenant] when the API key resolves to a user
+// (the common case); dashboard requests via Clerk eventually populate
+// this from the Clerk subject claim.
+func WithUser(ctx context.Context, userID string) context.Context {
+	return context.WithValue(ctx, userCtxKey, userID)
+}
+
+// UserID returns the user_id attached to ctx, or "" if absent. Empty is
+// not an error — it indicates the caller authenticated as a tenant-level
+// principal (e.g., a future tenant-scoped API key with no user binding).
+func UserID(ctx context.Context) string {
+	v, _ := ctx.Value(userCtxKey).(string)
 	return v
 }
 
