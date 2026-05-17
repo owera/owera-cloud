@@ -16,6 +16,7 @@ import (
 	"github.com/owera/owera-cloud/api/internal/billing"
 	"github.com/owera/owera-cloud/api/internal/catalog"
 	"github.com/owera/owera-cloud/api/internal/dispatcher"
+	"github.com/owera/owera-cloud/api/internal/erasure"
 	"github.com/owera/owera-cloud/api/internal/identity"
 	"github.com/owera/owera-cloud/api/internal/jobs"
 	"github.com/owera/owera-cloud/api/internal/queue"
@@ -32,6 +33,7 @@ type Deps struct {
 	Audit      *audit.Log
 	Billing    *billing.Service
 	Status     *status.Service
+	Erasure    *erasure.Service
 }
 
 // New returns the http.Handler with all routes registered.
@@ -82,6 +84,13 @@ func New(d Deps) http.Handler {
 	})
 
 	r.Get("/v1/usage", getUsage(d))
+
+	// LGPD Art. 18 / GDPR Art. 17 right-to-erasure. Returns 202 with
+	// the request id; the actual purge runs in the erasure worker
+	// against the durable queue. See compliance/runbooks/customer-
+	// data-deletion.md.
+	r.Delete("/v1/tenants/me/data", deleteTenantData(d))
+	r.Get("/v1/tenants/me/data/erasures/{id}", getErasure(d))
 
 	return r
 }
@@ -272,6 +281,83 @@ func getUsage(d Deps) http.HandlerFunc {
 			"period": period,
 			"meters": meters,
 		})
+	}
+}
+
+func deleteTenantData(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tenID := identity.TenantID(r.Context())
+		if tenID == "" {
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "missing tenant")
+			return
+		}
+		if d.Erasure == nil {
+			writeErr(w, http.StatusServiceUnavailable, "unavailable", "erasure service not configured")
+			return
+		}
+		// auth.Middleware only stamps tenant_id today; user_id will
+		// land when WS-15 extends the identity context. Until then
+		// the audit row carries an empty user_id for self-service
+		// erasures (still attributable via api_key prefix in the
+		// auth log).
+		userID := ""
+		ip := ""
+		ua := r.UserAgent()
+		if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
+			ip = xf
+		} else {
+			ip = r.RemoteAddr
+		}
+		req, err := d.Erasure.Submit(r.Context(), tenID, userID, ip, ua)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"request_id":   req.ID,
+			"state":        req.State,
+			"requested_at": req.RequestedAt,
+			"sla_due_at":   req.SLADueAt,
+			"notice": "LGPD Art. 18 / GDPR Art. 17 erasure scheduled; " +
+				"completion within 15 working days. Status: GET /v1/tenants/me/data/erasures/" + req.ID,
+		})
+	}
+}
+
+func getErasure(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tenID := identity.TenantID(r.Context())
+		if tenID == "" {
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "missing tenant")
+			return
+		}
+		if d.Erasure == nil {
+			writeErr(w, http.StatusServiceUnavailable, "unavailable", "erasure service not configured")
+			return
+		}
+		id := chi.URLParam(r, "id")
+		req, err := d.Erasure.Get(r.Context(), tenID, id)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		if req == nil {
+			writeErr(w, http.StatusNotFound, "not_found", "erasure request not found")
+			return
+		}
+		out := map[string]any{
+			"request_id":   req.ID,
+			"state":        req.State,
+			"requested_at": req.RequestedAt,
+			"sla_due_at":   req.SLADueAt,
+		}
+		if req.CompletedAt != nil {
+			out["completed_at"] = req.CompletedAt
+		}
+		if req.Report != nil {
+			out["report"] = req.Report
+		}
+		writeJSON(w, http.StatusOK, out)
 	}
 }
 
