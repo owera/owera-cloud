@@ -1,0 +1,42 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "buildCommand": "npm run build",
+  "devCommand": "npm run dev",
+  "installCommand": "npm install",
+  "outputDirectory": ".next",
+  "regions": ["iad1", "gru1"],
+  "git": {
+    "deploymentEnabled": {
+      "main": true
+    }
+  },
+  "github": {
+    "silent": false,
+    "autoJobCancelation": true,
+    "enabled": true
+  },
+  "env": {
+    "NEXT_PUBLIC_SNAPSHOT_URL": "{{REFERENCE:vercel.project.env.NEXT_PUBLIC_SNAPSHOT_URL}}"
+  },
+  "build": {
+    "env": {
+      "NEXT_PUBLIC_SNAPSHOT_URL": "{{REFERENCE:vercel.project.env.NEXT_PUBLIC_SNAPSHOT_URL}}"
+    }
+  },
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "X-Frame-Options", "value": "DENY" },
+        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
+        { "key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=()" },
+        { "key": "Strict-Transport-Security", "value": "max-age=63072000; includeSubDomains; preload" },
+        { "key": "Cache-Control", "value": "public, max-age=0, s-maxage=30, stale-while-revalidate=120" }
+      ]
+    }
+  ],
+  "cleanUrls": true,
+  "trailingSlash": false
+}
