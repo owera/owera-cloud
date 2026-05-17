@@ -98,6 +98,9 @@ func TestLedgerTailClient_NonTerminalThenComplete(t *testing.T) {
 	if outputs != nil {
 		t.Errorf("call 1: expected nil outputs, got %v", outputs)
 	}
+	if errMsg != "" {
+		t.Errorf("call 1: expected empty errMsg, got %q", errMsg)
+	}
 	if c.getCursor("tid") != t1.Format(time.RFC3339Nano) {
 		t.Errorf("cursor after call 1: got %q want %q", c.getCursor("tid"), t1.Format(time.RFC3339Nano))
 	}
