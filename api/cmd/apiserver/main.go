@@ -77,6 +77,14 @@ func run(addr, dbPath string) error {
 		Status:     statusSvc,
 	}
 
+	// Background dispatcher worker. The synthetic ledger poller is the
+	// stand-in until the operator plane exposes fleet.LedgerTail; see
+	// PR open question.
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	defer workerCancel()
+	worker := dispatcher.NewWorker(q, disp, jobsStore, dispatcher.NewSyntheticLedgerPoller(), dispatcher.DefaultWorkerConfig())
+	go worker.Run(workerCtx)
+
 	h := server.New(deps)
 	srv := &http.Server{
 		Addr:              addr,
