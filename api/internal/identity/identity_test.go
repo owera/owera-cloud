@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -46,8 +47,16 @@ func TestIssueAndLookupAPIKey(t *testing.T) {
 	if tok == "" {
 		t.Fatal("expected plaintext token")
 	}
-	if rec.HashHex == "" {
-		t.Fatal("expected hash stored")
+	if rec.Prefix == "" {
+		t.Fatal("expected display prefix stored")
+	}
+	// The display token must embed the prefix and must not be the secret
+	// itself — leaking the stored row should not yield a working bearer.
+	if !strings.Contains(tok, rec.Prefix) {
+		t.Fatalf("token %q does not contain prefix %q", tok, rec.Prefix)
+	}
+	if strings.Contains(tok, "verifier") {
+		t.Fatal("token leaks verifier")
 	}
 
 	got, err := s.LookupAPIKey(ctx, tok)
@@ -60,6 +69,33 @@ func TestIssueAndLookupAPIKey(t *testing.T) {
 
 	if _, err := s.LookupAPIKey(ctx, "bogus-token"); err == nil {
 		t.Fatal("expected error for bogus token")
+	}
+	// A token with the right prefix but wrong secret must also fail.
+	tampered := tok[:len(tok)-4] + "xxxx"
+	if _, err := s.LookupAPIKey(ctx, tampered); err == nil {
+		t.Fatal("expected error for tampered secret tail")
+	}
+}
+
+// TestVerifierIsArgon2id locks in the on-disk hash format so a future
+// "let's swap algorithms" change has to update this test deliberately.
+func TestVerifierIsArgon2id(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	ten, _ := s.CreateTenant(ctx, "Acme")
+	u, _ := s.CreateUser(ctx, ten.ID, "ops@acme.example")
+	_, rec, _ := s.IssueAPIKey(ctx, ten.ID, u.ID, "primary")
+
+	var verifier string
+	row := s.DB().QueryRowContext(ctx, `SELECT verifier FROM api_keys WHERE id=?`, rec.ID)
+	if err := row.Scan(&verifier); err != nil {
+		t.Fatalf("scan verifier: %v", err)
+	}
+	if !strings.HasPrefix(verifier, "$argon2id$v=19$m=") {
+		t.Fatalf("verifier not argon2id PHC: %q", verifier)
+	}
+	if strings.Contains(verifier, "sha256") {
+		t.Fatalf("verifier still SHA-256: %q", verifier)
 	}
 }
 
@@ -129,6 +165,27 @@ func TestCrossTenantReadReturnsNothing(t *testing.T) {
 		if u.Email == "bob@b.example" {
 			t.Fatal("leak: tenant A list contained tenant B row")
 		}
+	}
+}
+
+// TestGetUserCrossTenantReturnsNotFound is the per-row analog of the
+// list-level cross-tenant test: looking up a user by id while scoped to
+// the wrong tenant must return ErrNotFound, not the row.
+func TestGetUserCrossTenantReturnsNotFound(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	a, _ := s.CreateTenant(ctx, "TenantA")
+	b, _ := s.CreateTenant(ctx, "TenantB")
+	ua, _ := s.CreateUser(ctx, a.ID, "alice@a.example")
+
+	// Same-tenant lookup succeeds.
+	if got, err := s.GetUser(ctx, a.ID, ua.ID); err != nil || got.ID != ua.ID {
+		t.Fatalf("same-tenant GetUser: got=%v err=%v", got, err)
+	}
+	// Cross-tenant lookup returns ErrNotFound — never the row.
+	_, err := s.GetUser(ctx, b.ID, ua.ID)
+	if err != ErrNotFound {
+		t.Fatalf("cross-tenant GetUser: got err=%v want ErrNotFound", err)
 	}
 }
 

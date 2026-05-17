@@ -24,8 +24,9 @@ Operators reconcile this manifest against the live secret stores quarterly. Any 
 | `[ ]` | `STRIPE_WEBHOOK_SECRET` | `fly` | CFO | 180d | Rotated together with `STRIPE_SECRET_KEY` |
 | `[ ]` | `STRIPE_RESTRICTED_KEY_REPORTING` | `fly` | CFO | 180d | Read-only key for the billing/reporting pipeline |
 | `[ ]` | `CLOUDFLARE_API_TOKEN` | `fly`, `1password` | SRE | 90d | Scoped to Zone:DNS:Edit on owera.ai zone only |
-| `[ ]` | `CLERK_SECRET_KEY` | `fly` | SRE | 180d | Or `WORKOS_API_KEY` if WorkOS wins the auth bake-off |
+| `[ ]` | `CLERK_SECRET_KEY` | `fly` | SRE | 180d | TL pinned Clerk over WorkOS for Wave-8 (WS-15); consumed by api JWT-verify path |
 | `[ ]` | `CLERK_PUBLISHABLE_KEY` | `vercel` | SRE | 180d | Public; rotated alongside the secret key |
+| `[ ]` | `CLERK_JWT_TEMPLATE_OWERA_API` | `fly` | SRE | n/a | Name of the Clerk JWT template the api recognises ("owera-api"); referenced by web/lib/auth.ts getApiToken() |
 | `[ ]` | `OPERATOR_PLANE_PUBKEY_ED25519` | `fly` | CISO | incident | The operator-plane minisign pubkey; api verifies JWS payloads with it |
 | `[ ]` | `SQLITE_ENCRYPTION_KEY` | `fly` | CISO | 365d | sqlcipher passphrase for the api-local cache; rotation requires re-encrypt migration |
 | `[ ]` | `JWT_SIGNING_KEY` | `fly` | SRE | 90d | HS512; rotated with overlap window (api accepts old + new for 24h) |
