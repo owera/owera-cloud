@@ -20,9 +20,9 @@ Operators reconcile this manifest against the live secret stores quarterly. Any 
 
 | Status | Name | Store | Owner | Rotation | Notes |
 |--------|------|-------|-------|----------|-------|
-| `[ ]` | `STRIPE_SECRET_KEY` | `fly`, `1password` | CFO | 180d | Live keys only in fly; test keys in 1password for staging |
+| `[ ]` | `STRIPE_SECRET_KEY` | `fly`, `1password` | CFO | 180d | Live keys only in fly; **test** keys in 1password for staging. Consumed by `api/internal/billing.StripeBackend` (UsageRecord + Portal). |
 | `[ ]` | `STRIPE_WEBHOOK_SECRET` | `fly` | CFO | 180d | Rotated together with `STRIPE_SECRET_KEY` |
-| `[ ]` | `STRIPE_RESTRICTED_KEY_REPORTING` | `fly` | CFO | 180d | Read-only key for the billing/reporting pipeline |
+| `[ ]` | `STRIPE_RESTRICTED_KEY_REPORTING` | `fly` | CFO | 180d | Read-only key for the billing/reporting pipeline. Consumed by `api/cmd/reconciler` for `usage_record_summaries` reads only. |
 | `[ ]` | `CLOUDFLARE_API_TOKEN` | `fly`, `1password` | SRE | 90d | Scoped to Zone:DNS:Edit on owera.ai zone only |
 | `[ ]` | `CLERK_SECRET_KEY` | `fly` | SRE | 180d | Or `WORKOS_API_KEY` if WorkOS wins the auth bake-off |
 | `[ ]` | `CLERK_PUBLISHABLE_KEY` | `vercel` | SRE | 180d | Public; rotated alongside the secret key |
