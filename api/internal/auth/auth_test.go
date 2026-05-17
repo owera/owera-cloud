@@ -2,8 +2,10 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/owera/owera-cloud/api/internal/identity"
@@ -26,11 +28,21 @@ func setup(t *testing.T) (*identity.Store, string, string) {
 	return s, ten.ID, tok
 }
 
+func decodeAuthError(t *testing.T, body []byte) authErrorBody {
+	t.Helper()
+	var e authErrorBody
+	if err := json.Unmarshal(body, &e); err != nil {
+		t.Fatalf("decode error body: %v (body=%q)", err, body)
+	}
+	return e
+}
+
 func TestMiddleware_AllowsValidKey(t *testing.T) {
 	s, tenID, tok := setup(t)
-	var seenTenant string
+	var seenTenant, seenReqID string
 	h := Middleware(s, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenTenant = identity.TenantID(r.Context())
+		seenReqID = RequestID(r.Context())
 		w.WriteHeader(http.StatusOK)
 	}))
 	req := httptest.NewRequest("GET", "/v1/jobs", nil)
@@ -42,6 +54,13 @@ func TestMiddleware_AllowsValidKey(t *testing.T) {
 	}
 	if seenTenant != tenID {
 		t.Fatalf("tenant: got %q want %q", seenTenant, tenID)
+	}
+	if seenReqID == "" {
+		t.Fatal("request id was not propagated into the handler ctx")
+	}
+	if rec.Header().Get("X-Request-Id") != seenReqID {
+		t.Fatalf("X-Request-Id mismatch: header=%q ctx=%q",
+			rec.Header().Get("X-Request-Id"), seenReqID)
 	}
 }
 
@@ -55,6 +74,19 @@ func TestMiddleware_RejectsMissingHeader(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status: got %d want 401", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("content-type: got %q want application/json", got)
+	}
+	body := decodeAuthError(t, rec.Body.Bytes())
+	if body.Error != "unauthorized" {
+		t.Fatalf("error code: got %q want unauthorized", body.Error)
+	}
+	if body.RequestID == "" {
+		t.Fatal("request_id missing from error body")
+	}
+	if !strings.Contains(body.Message, "Authorization") {
+		t.Fatalf("message: got %q", body.Message)
 	}
 }
 
@@ -70,12 +102,14 @@ func TestMiddleware_RejectsMalformedHeader(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status: got %d want 401", rec.Code)
 	}
+	body := decodeAuthError(t, rec.Body.Bytes())
+	if body.Error != "unauthorized" || body.RequestID == "" {
+		t.Fatalf("error body: %+v", body)
+	}
 }
 
 func TestMiddleware_RejectsRevokedKey(t *testing.T) {
-	s, tenID, tok := setup(t)
-	_ = tenID
-	// Find and revoke the key we just issued. Look it up via the token then revoke.
+	s, _, tok := setup(t)
 	rec0, err := s.LookupAPIKey(context.Background(), tok)
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
@@ -92,6 +126,10 @@ func TestMiddleware_RejectsRevokedKey(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status: got %d want 401", rec.Code)
+	}
+	body := decodeAuthError(t, rec.Body.Bytes())
+	if body.Message != "api key revoked" {
+		t.Fatalf("revoked message: got %q", body.Message)
 	}
 }
 
@@ -111,5 +149,23 @@ func TestMiddleware_SkipAuthPaths(t *testing.T) {
 	}
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status: got %d want 200", rec.Code)
+	}
+	if rec.Header().Get("X-Request-Id") == "" {
+		t.Fatal("X-Request-Id missing on skip-auth path")
+	}
+}
+
+func TestMiddleware_EchoesIncomingRequestID(t *testing.T) {
+	s, _, tok := setup(t)
+	h := Middleware(s, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest("GET", "/v1/jobs", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("X-Request-Id", "req_supplied_by_caller")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if got := rec.Header().Get("X-Request-Id"); got != "req_supplied_by_caller" {
+		t.Fatalf("echo: got %q want req_supplied_by_caller", got)
 	}
 }
