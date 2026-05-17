@@ -7,7 +7,7 @@ on:
       - "web/**"
       - ".github/workflows/ci-web.yml"
   pull_request:
-    branches: [main]
+    branches: [main, "wave-*"]
     paths:
       - "web/**"
       - ".github/workflows/ci-web.yml"
