@@ -24,10 +24,21 @@ import (
 
 // PricingTier describes how a SKU is billed.
 //
-//	Model: "monthly_subscription" or "metered"
-//	BaseCents: the recurring base price (0 for purely metered SKUs)
+// Model is one of the canonical lower-snake-case values below. The
+// catalog [Dispatcher] reads Model at billing-reconcile time and routes
+// the event to the matching billing.DispatchKind:
+//
+//	Model                   Meaning                                              Stripe shape                            Billing dispatch
+//	---------------------   --------------------------------------------------   -------------------------------------   ----------------
+//	"metered"               Pure usage-based, no base fee.                       recurring + meter                       EmitUsage
+//	"monthly_subscription"  Base monthly fee with optional metered overage.      recurring (licensed base + metered)     EmitUsage on overage events
+//	"per_job_fixed"         Each unit of work is a discrete billable event.      one_time                                EmitOneShot
+//
+//	BaseCents: the recurring base price (0 for purely metered or per-job SKUs).
 //	OverageRule: the per-unit billing rule applied on top of base, e.g.
-//	             "ticket", "campaign", "minute"
+//	             "ticket", "campaign", "minute". For per_job_fixed SKUs this
+//	             names the unit of work even though there is no base+overage
+//	             relationship.
 type PricingTier struct {
 	Model       string `json:"model"`
 	BaseCents   int64  `json:"base_cents"`
