@@ -1,0 +1,65 @@
+name: ci-status
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "status/**"
+      - ".github/workflows/ci-status.yml"
+      - "infra/status.vercel.json"
+  pull_request:
+    branches: [main]
+    paths:
+      - "status/**"
+      - ".github/workflows/ci-status.yml"
+      - "infra/status.vercel.json"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: typecheck + lint + build (node-${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: status/app/package-lock.json
+
+      - name: install
+        working-directory: status/app
+        run: npm ci --no-audit --no-fund
+
+      - name: typecheck
+        working-directory: status/app
+        run: npm run typecheck
+
+      - name: lint
+        working-directory: status/app
+        run: npm run lint
+
+      - name: build
+        working-directory: status/app
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: npm run build
+
+  yaml-validate:
+    name: components.yaml schema
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: parse yaml
+        run: |
+          python3 -c "import yaml,sys; d=yaml.safe_load(open('status/components.yaml')); \
+            assert d.get('components'), 'no components'; \
+            assert d.get('groups'), 'no groups'; \
+            print(f\"ok: {len(d['components'])} components, {len(d['groups'])} groups\")"

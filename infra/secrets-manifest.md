@@ -42,6 +42,15 @@ Operators reconcile this manifest against the live secret stores quarterly. Any 
 | `[ ]` | `NEXT_PUBLIC_STATUS_URL` | `vercel` | SRE | n/a | `https://status.owera.ai` |
 | `[ ]` | `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | `vercel` | SRE | 180d | Mirrors the api-tier value |
 | `[ ]` | `CLERK_SECRET_KEY` | `vercel` | SRE | 180d | Only for SSR route handlers; never shipped to client |
+| `[ ]` | `VERCEL_TOKEN` | `1password` | SRE | 90d | CI deploy token (used by `gh workflow` if/when we gate deploys; Vercel for Git handles auto-deploys without it) |
+
+## Status page (Vercel — separate project)
+
+| Status | Name | Store | Owner | Rotation | Notes |
+|--------|------|-------|-------|----------|-------|
+| `[ ]` | `NEXT_PUBLIC_SNAPSHOT_URL` | `vercel` | SRE | n/a | `https://snapshots.owera.ai/health/latest.json`; public URL of the operator-plane health snapshot |
+| `[ ]` | `SNAPSHOT_PUBLISHER_R2_ACCESS_KEY` | `keychain` | SRE | 90d | Operator-plane uses this to PUT the snapshot to the R2 bucket; not consumed by the status page itself |
+| `[ ]` | `SNAPSHOT_PUBLISHER_R2_SECRET_KEY` | `keychain` | SRE | 90d | Paired with the access key above |
 
 ## Operator-plane tunnel (Mac mini gateway)
 
