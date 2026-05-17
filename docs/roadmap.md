@@ -2,7 +2,7 @@
 
 > **Audience: internal team + select prospects under NDA.** This is the planned ramp; it changes with demand and engineering signal. Source of truth for delivered state is the git log on `main` + the GA gates (`compliance/policies/ga-gate.md`). For the master plan (waves, workstreams, ticket backlog), see [`knowing-all-you-now-calm-leaf.md`](https://github.com/owera/owera-fleet/blob/main/knowing-all-you-now-calm-leaf.md) in the operator-plane repo.
 
-Last updated: 2026-05-17 (PM — Wave 8.2).
+Last updated: 2026-05-17 (evening — Wave 9-A close-out).
 
 ## What we're working on right now
 
@@ -10,13 +10,13 @@ The single most important question this doc has to answer. Updated whenever the 
 
 | Thread | State | Owner | Blocker |
 |---|---|---|---|
-| **V0 end-to-end smoke** — onboard a test tenant via `/v1/admin/*`, mint an `owc_*` API key, submit a `triage-watch` job, see it traverse cloud → tunnel → operator → ledger → Stripe usage record | 🚧 In flight | Claude (under Rodrigo) | `OWERA_ADMIN_TOKEN` access (Fly stores digest-only; rotate or look up locally) |
-| **Production seams** (Stripe + Clerk + operator RPC + admin endpoints + Dockerfile + Fly deploy) | ✅ Shipped to `main` and live at `https://owera-agentic-api.fly.dev` | — | None |
-| **`/readyz` reports green** against the real operator plane via the tunnel | ✅ Shipped (PR #31) — boot log shows `rpc=tunnel(https://internal-rpc.owera.com)` | — | None |
-| **Admin API-key mint endpoint** (closes the last onboarding tooling-debt) | ✅ Shipped (PR #32) | — | None |
+| **Stripe billing now emits in production** — outbox flusher (60 s ticker) + daily drift detector both live; boot log shows `reconciler=on (drift detector, daily)` | ✅ Deployed (PR #37) | — | None |
+| **V0 end-to-end smoke** — onboard a test tenant via `/v1/admin/*`, mint an `owc_*` API key, submit a `triage-watch` job, see it traverse cloud → tunnel → operator → ledger → Stripe usage record | 🚧 In flight | Rodrigo (operator) | `OWERA_ADMIN_TOKEN` access (Fly stores digest-only; rotate or look up locally) |
+| **Customer-facing docs aligned with live admin endpoints** — onboarding.md + support.md + new support-sla.md runbook | ✅ Shipped (PR #36) | — | None |
+| **CodeQL workflow staged** for repo-public flip (Go + JS scanners) | ✅ Shipped (PR #35) with private-repo guard; activates automatically when repo flips public | — | Repo visibility flip is an operator action |
 | **Operator-plane work** (sibling repo) | ⏩ See [`owera-fleet` roadmap](https://github.com/owera/owera-fleet/blob/main/docs/roadmap.md) | — | — |
 
-> **TL;DR for "where are we at?":** Phase 3 production wire-up is done; the platform is live; we're one operator action (admin-token lookup or rotation) away from running the first SKU end-to-end on the production stack.
+> **TL;DR for "where are we at?":** All Phase-3 engineering shipped, including the production billing-emission reconciler. The platform is end-to-end live. One operator-action sequence (admin-token, then first job submission) demonstrates the V0 SKU; one more (repo-public flip + staging Mac procurement) opens Phase-4 launch readiness.
 
 ## Status at a glance
 
@@ -27,7 +27,10 @@ The single most important question this doc has to answer. Updated whenever the 
 | 8 | Phase-3 core build (WS-14, 15, 16, 17, 18, 19) | Shipped to `owera-cloud/main` |
 | 8.1 | Wave-8 follow-ups (PRAGMA, usage shape, user_id, this doc) | Shipped |
 | 8.2 | Production wire-up: API Dockerfile + Fly deploy, Clerk JWT + admin endpoints, `/readyz` operator-plane RPC, admin API-key mint, onboarding playbook v2; on fleet side: `fleet.LedgerTail` RPC + snapshot publisher + launchd installer | Shipped |
-| 9 | Phase-4 launch readiness (staging fleet, drill, beta-1) | Planned — Stripe cleanup + repo-public flip + staging Mac are the gating operator actions |
+| 9-A + B1 | Phase-1 verification gate + Phase-2 e2e coverage + reconciler wire-up: 11 PRs (cloud #35 CodeQL, #36 customer docs+SLA, #37 reconciler, #38 lint cleanup; fleet #14 audit-config, #15 swarm e2e, #16 cronjob+alert e2e, #17 markers CLI, #18 drift cleanup, #19 bootstrap phases 1-9, #20 state parity) | Shipped |
+| 9-C | Live verification gauntlet + hermes-setup cutover | Engineering ready; gated on `claw-staging.local` Mac procurement (operator) |
+| 10 | Phase-4 launch readiness (PagerDuty drill, BR legal/tax, design partner #1) | Planned — Stripe live-mode, repo-public flip, staging Mac, PagerDuty, BR tax accountant, BR SaaS lawyer are the gating operator actions |
+| 11 | Beta → GA decision | Gated on GA policy |
 | 10 | Beta → GA decision | Gated on GA policy |
 | Post-GA | V2–V4 catalogue ramp | Demand-driven |
 
@@ -119,3 +122,4 @@ Anything in V0-V2 is committed to. V3-V4 entries are intent, not promise.
 | 2026-05-17 | TL (Wave 8.1) | Initial publication for T13.7 closeout; ramp matches master-plan §"SKU rollout sequence" |
 | 2026-05-17 (PM) | TL (Wave 8.2) | Status table updated: Waves 8 + 8.1 marked Shipped; new Wave 8.2 row covers production wire-up across both repos (cloud PRs #25–#32, fleet PRs #7–#11). Wave 9 gating clarified — Stripe account cleanup, `owera-cloud` repo visibility flip, and `claw-staging.local` provisioning are operator-action blockers, not engineering. See master-plan execution log for the per-PR breakdown. |
 | 2026-05-17 (later PM) | Claude (under Rodrigo) | Added "What we're working on right now" stanza at the top so the answer to "where are we at?" is on the first screen, not buried in a table. Mirrors the equivalent stanza in `owera-fleet/docs/roadmap.md` (created the same evening). |
+| 2026-05-17 (evening) | Claude (under Rodrigo) | Wave 9-A + B1 close-out. 11 PRs merged across both repos (cloud #35 CodeQL, #36 customer docs+SLA, #37 reconciler wire-up + Fly deploy verified, #38 lint cleanup; fleet #14 audit-config, #15/#16/#17 real e2e scenarios, #18 drift cleanup, #19 bootstrap phases 1-9, #20 state parity). Production billing emission live: `apiserver: reconciler=on (drift detector, daily)` in boot log. Wave 9 row renamed to "9-A + B1"; added 9-C row for verification gauntlet + cutover (gated on `claw-staging.local`). Now operator-action-bound on every remaining Phase-4 item. |
