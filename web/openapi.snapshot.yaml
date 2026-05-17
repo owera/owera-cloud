@@ -1,0 +1,262 @@
+openapi: 3.1.0
+info:
+  title: Owera Cloud Customer API
+  version: "1.0.0"
+  summary: Public API for paying Owera Cloud customers.
+  description: |
+    The Owera Cloud customer API exposes a small, stable surface for submitting
+    jobs against the Owera agent catalog, inspecting their lifecycle, querying
+    usage, and listing available SKUs.
+
+    All endpoints except `/healthz` require an `Authorization: Bearer <api-key>`
+    header. The API key resolves to a tenant; every response is scoped to that
+    tenant.
+servers:
+  - url: https://api.owera.ai
+    description: Production
+  - url: http://localhost:8080
+    description: Local development
+
+security:
+  - apiKey: []
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+        detail:
+          type: string
+    Job:
+      type: object
+      required: [id, status, sku, submitted_at, updated_at]
+      properties:
+        id: { type: string }
+        status:
+          type: string
+          enum: [submitted, queued, running, succeeded, failed, cancelled]
+        sku: { type: string }
+        submitted_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        outputs:
+          type: object
+          additionalProperties: true
+          nullable: true
+        error:
+          type: string
+          nullable: true
+    JobCreate:
+      type: object
+      required: [sku, inputs]
+      properties:
+        sku: { type: string }
+        inputs:
+          type: object
+          additionalProperties: true
+        idempotency_key:
+          type: string
+          nullable: true
+    JobCreated:
+      type: object
+      required: [job_id, status]
+      properties:
+        job_id: { type: string }
+        status: { type: string }
+    JobList:
+      type: object
+      required: [jobs]
+      properties:
+        jobs:
+          type: array
+          items: { $ref: "#/components/schemas/Job" }
+        next_cursor:
+          type: string
+          nullable: true
+    SKU:
+      type: object
+      required: [name, version, category]
+      properties:
+        name: { type: string }
+        version: { type: string }
+        category: { type: string }
+        inputs_schema:
+          type: object
+          additionalProperties: true
+        pricing:
+          type: object
+          properties:
+            model: { type: string }
+            base_cents: { type: integer }
+            overage_rule: { type: string }
+        sla:
+          type: object
+          properties:
+            description: { type: string }
+            max_latency_seconds: { type: integer }
+        billing_meter:
+          type: string
+    SKUList:
+      type: object
+      required: [skus]
+      properties:
+        skus:
+          type: array
+          items: { $ref: "#/components/schemas/SKU" }
+    Usage:
+      type: object
+      required: [meters]
+      properties:
+        period:
+          type: string
+        meters:
+          type: object
+          additionalProperties:
+            type: integer
+    CancelResult:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [cancelled]
+
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: OK
+  /readyz:
+    get:
+      summary: Readiness probe
+      security: []
+      responses:
+        "200":
+          description: Ready
+        "503":
+          description: Not ready
+  /v1/jobs:
+    post:
+      summary: Submit a job
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/JobCreate" }
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobCreated" }
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: SKU not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    get:
+      summary: List jobs for the authenticated tenant
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string }
+        - in: query
+          name: sku
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200 }
+        - in: query
+          name: cursor
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobList" }
+  /v1/jobs/{id}:
+    get:
+      summary: Fetch a single job
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /v1/jobs/{id}/cancel:
+    post:
+      summary: Cancel a job
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Cancelled
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CancelResult" }
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: Cannot cancel in current state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /v1/skus:
+    get:
+      summary: List the global SKU catalog
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SKUList" }
+  /v1/usage:
+    get:
+      summary: Usage meters for the authenticated tenant
+      parameters:
+        - in: query
+          name: period
+          schema: { type: string, enum: [current] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Usage" }

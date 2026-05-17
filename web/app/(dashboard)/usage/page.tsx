@@ -1,111 +1,142 @@
-"use client";
-
 import * as React from "react";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
-import { getApiToken } from "@/lib/auth";
+import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
+import { api, ApiClientError } from "@/lib/api-client";
+import { formatCents, formatCount, shortTimestamp } from "@/lib/format";
+import type { UsageMeter } from "@/lib/types";
 
-// Current-period usage meter (T16.4 / shared with WS-17 T17.4).
-//
-// WS-16 owns the data shape and fetch; WS-17 owns the visual chrome and
-// can replace the body of <UsageTable/> below without touching this
-// page's data layer. The contract: each row is { sku, units } as returned
-// from GET /v1/usage.
+export const metadata = { title: "Usage" };
+export const dynamic = "force-dynamic";
 
-interface UsageMeters {
-  period: string;
-  meters: Record<string, number>;
-}
+const FIXTURE: UsageMeter = {
+  periodStart: "2026-05-01T00:00:00Z",
+  periodEnd: "2026-05-31T23:59:59Z",
+  totalCostCents: 482300,
+  jobsCount: 1284,
+  bySku: {
+    "agentic.research": { jobs: 412, costCents: 198400 },
+    "agentic.etl": { jobs: 522, costCents: 142700 },
+    "agentic.build": { jobs: 350, costCents: 141200 },
+  },
+};
 
-async function fetchUsage(): Promise<UsageMeters> {
-  const apiBase =
-    process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
-  const token = await getApiToken();
-  const res = await fetch(`${apiBase}/v1/usage`, {
-    headers: {
-      accept: "application/json",
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-    },
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}`);
+async function safeFetch(): Promise<{ usage: UsageMeter; live: boolean }> {
+  try {
+    return { usage: await api.getCurrentUsage(), live: true };
+  } catch (err) {
+    if (err instanceof ApiClientError || err instanceof Error) {
+      return { usage: FIXTURE, live: false };
+    }
+    throw err;
   }
-  return (await res.json()) as UsageMeters;
 }
 
-export default function UsagePage(): React.ReactElement {
-  const [data, setData] = React.useState<UsageMeters | null>(null);
-  const [error, setError] = React.useState<string | null>(null);
-
-  React.useEffect(() => {
-    fetchUsage()
-      .then(setData)
-      .catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : "unknown error");
-      });
-  }, []);
-
-  const rows = data ? Object.entries(data.meters) : [];
+export default async function UsagePage() {
+  const { usage, live } = await safeFetch();
+  const rows = Object.entries(usage.bySku).sort((a, b) =>
+    b[1].costCents - a[1].costCents,
+  );
+  const maxCost = Math.max(1, ...rows.map(([, r]) => r.costCents));
 
   return (
     <div className="space-y-6">
       <header className="flex items-baseline justify-between">
-        <h1 className="font-mono text-xl font-semibold tracking-tight">
-          USAGE
-        </h1>
-        <span className="text-[10px] uppercase tracking-wide font-mono text-[var(--color-muted-foreground)]">
-          period: {data?.period ?? "—"}
-        </span>
+        <div>
+          <h1 className="font-mono text-xl font-semibold tracking-tight">
+            USAGE
+          </h1>
+          <p className="text-xs text-[var(--color-muted-foreground)] mt-1">
+            Billing period {shortTimestamp(usage.periodStart)} →{" "}
+            {shortTimestamp(usage.periodEnd)}
+          </p>
+        </div>
+        {!live && (
+          <span className="text-[10px] uppercase tracking-wide font-mono text-[var(--color-state-running)]">
+            FIXTURE DATA — API not reachable
+          </span>
+        )}
       </header>
+
+      <section className="grid grid-cols-3 gap-3">
+        <Stat label="JOBS THIS PERIOD" value={formatCount(usage.jobsCount)} />
+        <Stat label="COST TO DATE" value={formatCents(usage.totalCostCents)} />
+        <Stat
+          label="ACTIVE SKUS"
+          value={String(Object.keys(usage.bySku).length)}
+        />
+      </section>
 
       <Card>
         <CardHeader>
-          <CardTitle>METERED USAGE</CardTitle>
+          <CardTitle>BY SKU</CardTitle>
         </CardHeader>
-        <CardBody>
-          {error ? (
-            <p className="text-sm text-[var(--color-state-failed)]">
-              {error}
-            </p>
-          ) : rows.length === 0 ? (
-            <p className="text-sm text-[var(--color-muted-foreground)]">
-              No usage recorded this period.
-            </p>
-          ) : (
-            <UsageTable rows={rows} />
-          )}
+        <Table>
+          <THead>
+            <TR>
+              <TH>SKU</TH>
+              <TH className="text-right">JOBS</TH>
+              <TH className="text-right">COST</TH>
+              <TH className="w-1/3">SHARE</TH>
+            </TR>
+          </THead>
+          <TBody>
+            {rows.map(([slug, r]) => (
+              <TR key={slug}>
+                <TD>{slug}</TD>
+                <TD className="text-right">{formatCount(r.jobs)}</TD>
+                <TD className="text-right">{formatCents(r.costCents)}</TD>
+                <TD>
+                  <Bar value={r.costCents} max={maxCost} />
+                </TD>
+              </TR>
+            ))}
+            {rows.length === 0 && (
+              <TR>
+                <TD
+                  colSpan={4}
+                  className="text-center text-[var(--color-muted-foreground)] py-6"
+                >
+                  No usage yet this period.
+                </TD>
+              </TR>
+            )}
+          </TBody>
+        </Table>
+      </Card>
+
+      <Card>
+        <CardBody className="text-xs text-[var(--color-muted-foreground)] leading-relaxed">
+          Usage meters reflect the signed ledger emitted by the operator plane.
+          If a meter disagrees with a Stripe invoice, the ledger wins —{" "}
+          <span className="font-mono">/billing</span> opens the Stripe portal
+          where the source-of-truth invoice lives.
         </CardBody>
       </Card>
     </div>
   );
 }
 
-function UsageTable({
-  rows,
-}: {
-  rows: Array<[string, number]>;
-}): React.ReactElement {
+function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <table className="w-full text-sm font-mono">
-      <thead>
-        <tr className="text-left text-[10px] uppercase tracking-wide text-[var(--color-muted-foreground)]">
-          <th className="pb-2">SKU</th>
-          <th className="pb-2 text-right">Units</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map(([sku, units]) => (
-          <tr
-            key={sku}
-            className="border-t border-[var(--color-border)]"
-          >
-            <td className="py-2">{sku}</td>
-            <td className="py-2 text-right">
-              {units.toLocaleString()}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <Card>
+      <CardBody>
+        <div className="text-[10px] uppercase tracking-wide text-[var(--color-muted-foreground)]">
+          {label}
+        </div>
+        <div className="mt-1 font-mono text-2xl">{value}</div>
+      </CardBody>
+    </Card>
+  );
+}
+
+function Bar({ value, max }: { value: number; max: number }) {
+  const pct = Math.round((value / max) * 100);
+  return (
+    <div className="h-2 w-full rounded bg-[var(--color-muted)] overflow-hidden">
+      <div
+        className="h-full bg-[var(--color-primary)]"
+        style={{ width: `${pct}%` }}
+      />
+    </div>
   );
 }

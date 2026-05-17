@@ -8,7 +8,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "generate:api": "./scripts/generate-api-client.sh"
   },
   "dependencies": {
     "@clerk/nextjs": "~6.10.0",
@@ -30,6 +31,7 @@
     "autoprefixer": "^10.4.20",
     "eslint": "^9.14.0",
     "eslint-config-next": "15.0.3",
+    "openapi-typescript": "^7.13.0",
     "postcss": "^8.4.49",
     "tailwindcss": "^4.0.0-beta.4",
     "typescript": "^5.6.3"

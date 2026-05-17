@@ -1,10 +1,7 @@
 import * as React from "react";
-import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
-import { Badge } from "@/components/ui/badge";
+import { Card, CardBody } from "@/components/ui/card";
+import { ApiKeysManager } from "@/components/api-keys-manager";
 import { api, ApiClientError } from "@/lib/api-client";
-import { relativeTime, shortTimestamp } from "@/lib/format";
 import type { ApiKey } from "@/lib/types";
 
 export const metadata = { title: "API keys" };
@@ -51,68 +48,17 @@ export default async function ApiKeysPage() {
         <h1 className="font-mono text-xl font-semibold tracking-tight">
           API KEYS
         </h1>
-        <div className="flex items-center gap-3">
-          {!live && (
-            <span className="text-[10px] uppercase tracking-wide font-mono text-[var(--color-state-running)]">
-              FIXTURE DATA
-            </span>
-          )}
-          {/* The actual create flow lives in a follow-on PR — needs a modal +
-              one-time-secret reveal UI. */}
-          <Button variant="primary" disabled>
-            New key
-          </Button>
-        </div>
       </header>
 
       <Card>
-        <CardHeader>
-          <CardTitle>ACTIVE KEYS</CardTitle>
-        </CardHeader>
-        <Table>
-          <THead>
-            <TR>
-              <TH>NAME</TH>
-              <TH>ID</TH>
-              <TH>SECRET</TH>
-              <TH>SCOPES</TH>
-              <TH>CREATED</TH>
-              <TH>LAST USED</TH>
-              <TH>ACTION</TH>
-            </TR>
-          </THead>
-          <TBody>
-            {keys.map((k) => (
-              <TR key={k.id}>
-                <TD>{k.name}</TD>
-                <TD className="text-[var(--color-muted-foreground)]">{k.id}</TD>
-                <TD>sk_…{k.lastFour}</TD>
-                <TD className="flex gap-1">
-                  {k.scopes.map((s) => (
-                    <Badge key={s}>{s}</Badge>
-                  ))}
-                </TD>
-                <TD title={k.createdAt}>{shortTimestamp(k.createdAt)}</TD>
-                <TD title={k.lastUsedAt ?? "never"}>
-                  {k.lastUsedAt ? relativeTime(k.lastUsedAt) : "never"}
-                </TD>
-                <TD>
-                  <Button size="sm" variant="danger" disabled>
-                    Revoke
-                  </Button>
-                </TD>
-              </TR>
-            ))}
-          </TBody>
-        </Table>
+        <ApiKeysManager initial={keys} live={live} />
       </Card>
 
       <Card>
         <CardBody className="text-xs text-[var(--color-muted-foreground)]">
           Keys are scoped credentials. Secrets are shown exactly once — at
-          creation time — and never stored client-side. The api/ agent will
-          expose <code>POST /v1/api-keys</code> and{" "}
-          <code>DELETE /v1/api-keys/:id</code>.
+          creation time — and never stored client-side. Revocation invalidates
+          the key immediately at the API edge.
         </CardBody>
       </Card>
     </div>

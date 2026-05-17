@@ -1,7 +1,8 @@
 import * as React from "react";
 import Link from "next/link";
-import { Card } from "@/components/ui/card";
+import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { JobsTable } from "@/components/jobs-table";
+import { SubmitJobForm } from "@/components/submit-job-form";
 import { api } from "@/lib/api-client";
 import { JOB_STATES, type Job, type JobState } from "@/lib/types";
 
@@ -114,6 +115,15 @@ export default async function JobsPage({ searchParams }: PageProps) {
           </span>
         )}
       </header>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>SUBMIT</CardTitle>
+        </CardHeader>
+        <CardBody>
+          <SubmitJobForm />
+        </CardBody>
+      </Card>
 
       <div className="flex items-center gap-2 text-xs font-mono">
         <FilterLink current={state} target={undefined}>
