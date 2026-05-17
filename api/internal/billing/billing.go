@@ -86,13 +86,64 @@ type LedgerEvent struct {
 	Ts       time.Time
 }
 
+// SKUDispatcher decides how a pending billing event should be emitted —
+// metered (usage_records / meter_events) vs per-job-fixed (invoice
+// items). The production implementation lives in the catalog package
+// (or a thin adapter) and routes by Pricing.Model. Service does not
+// import catalog directly; tests stub via this interface.
+//
+// A nil SKUDispatcher on Service means "treat every event as metered"
+// — preserves the pre-PR-21 behaviour for callers that haven't been
+// updated.
+type SKUDispatcher interface {
+	Dispatch(ctx context.Context, p PendingEvent) (DispatchPlan, error)
+}
+
+// PendingEvent is the row Reconcile pulled off the outbox, projected
+// into the shape SKUDispatcher needs (no DB primary key, no billed_at).
+type PendingEvent struct {
+	EntryID  string
+	TenantID string
+	SKU      string
+	Meter    string
+	Units    int64
+	Ts       time.Time
+}
+
+// DispatchPlan tells Reconcile which Backend method to call for a
+// pending event, with the args that method needs.
+//
+//	Kind == "metered"      → backend.EmitUsage(UsageEmit{Meter: MeterName, ...})
+//	Kind == "oneshot"      → backend.EmitOneShot(OneShotEmit{PriceID, Quantity, Description, ...})
+//	Kind == "skip"         → no-op; mark billed without emitting (e.g., free tier)
+type DispatchPlan struct {
+	Kind        string
+	MeterName   string // metered only
+	PriceID     string // oneshot only
+	Quantity    int64  // oneshot only (0 → 1)
+	Description string // oneshot only
+}
+
+// DispatchKind enumeration constants for type-safety at callsites.
+const (
+	DispatchKindMetered = "metered"
+	DispatchKindOneShot = "oneshot"
+	DispatchKindSkip    = "skip"
+)
+
 // Service wires a Backend to a durable outbox table. ledger events come
 // in via Record; reconciliation flushes pending rows by calling the
 // backend and marking them billed.
 type Service struct {
-	db      *sql.DB
-	backend Backend
+	db         *sql.DB
+	backend    Backend
+	dispatcher SKUDispatcher // optional; nil → all-metered
 }
+
+// SetDispatcher installs the per-SKU dispatch policy. Pass nil to fall
+// back to all-metered. Safe to call at any time before Reconcile; not
+// safe to call concurrently with Reconcile.
+func (s *Service) SetDispatcher(d SKUDispatcher) { s.dispatcher = d }
 
 // New returns a billing service writing to db and emitting via backend.
 func New(db *sql.DB, backend Backend) (*Service, error) {
@@ -200,16 +251,50 @@ func (s *Service) Reconcile(ctx context.Context) (int, error) {
 
 	emitted := 0
 	for _, p := range ps {
-		emit := UsageEmit{
+		evt := PendingEvent{
+			EntryID:  p.EntryID,
 			TenantID: p.TenantID,
 			SKU:      p.SKU,
 			Meter:    p.Meter,
 			Units:    p.Units,
 			Ts:       p.Ts,
-			IdemKey:  fmt.Sprintf("usage:%s:%s", p.TenantID, p.EntryID),
 		}
-		if err := s.backend.EmitUsage(ctx, emit); err != nil {
-			return emitted, fmt.Errorf("billing: emit: %w", err)
+		plan, err := s.planFor(ctx, evt)
+		if err != nil {
+			return emitted, fmt.Errorf("billing: dispatch %s: %w", p.EntryID, err)
+		}
+		switch plan.Kind {
+		case DispatchKindSkip:
+			// No emit; just mark billed so we don't replay.
+		case DispatchKindOneShot:
+			emit := OneShotEmit{
+				TenantID:    p.TenantID,
+				SKU:         p.SKU,
+				PriceID:     plan.PriceID,
+				Quantity:    plan.Quantity,
+				Description: plan.Description,
+				Ts:          p.Ts,
+				IdemKey:     fmt.Sprintf("oneshot:%s:%s", p.TenantID, p.EntryID),
+			}
+			if err := s.backend.EmitOneShot(ctx, emit); err != nil {
+				return emitted, fmt.Errorf("billing: emit oneshot: %w", err)
+			}
+		default: // DispatchKindMetered or any unrecognised value
+			meter := plan.MeterName
+			if meter == "" {
+				meter = p.Meter
+			}
+			emit := UsageEmit{
+				TenantID: p.TenantID,
+				SKU:      p.SKU,
+				Meter:    meter,
+				Units:    p.Units,
+				Ts:       p.Ts,
+				IdemKey:  fmt.Sprintf("usage:%s:%s", p.TenantID, p.EntryID),
+			}
+			if err := s.backend.EmitUsage(ctx, emit); err != nil {
+				return emitted, fmt.Errorf("billing: emit usage: %w", err)
+			}
 		}
 		if _, err := s.db.ExecContext(ctx,
 			`UPDATE billing_outbox SET billed_at=? WHERE id=?`,
@@ -220,6 +305,16 @@ func (s *Service) Reconcile(ctx context.Context) (int, error) {
 		emitted++
 	}
 	return emitted, nil
+}
+
+// planFor returns the DispatchPlan for evt. If no dispatcher is wired
+// the default is "metered with the event's own Meter" — preserves the
+// behaviour from before SKUDispatcher existed.
+func (s *Service) planFor(ctx context.Context, evt PendingEvent) (DispatchPlan, error) {
+	if s.dispatcher == nil {
+		return DispatchPlan{Kind: DispatchKindMetered, MeterName: evt.Meter}, nil
+	}
+	return s.dispatcher.Dispatch(ctx, evt)
 }
 
 // UsageByTenant returns a sku→units aggregate over the outbox rows
