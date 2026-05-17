@@ -33,43 +33,54 @@ components:
       properties:
         error:
           type: string
+          example: bad_inputs
         detail:
           type: string
+          example: "catalog: invalid inputs for triage-watch@v1: missing properties: 'queue_url'"
     Job:
       type: object
       required: [id, status, sku, submitted_at, updated_at]
       properties:
-        id: { type: string }
+        id: { type: string, example: "job_AbCdEf0123456789" }
         status:
           type: string
           enum: [submitted, queued, running, succeeded, failed, cancelled]
-        sku: { type: string }
-        submitted_at: { type: string, format: date-time }
-        updated_at: { type: string, format: date-time }
+          example: succeeded
+        sku: { type: string, example: "triage-watch@v1" }
+        submitted_at: { type: string, format: date-time, example: "2026-05-16T12:00:00Z" }
+        updated_at: { type: string, format: date-time, example: "2026-05-16T12:00:42Z" }
         outputs:
           type: object
           additionalProperties: true
           nullable: true
+          example:
+            tickets_processed: 14
+            escalated: 2
         error:
           type: string
           nullable: true
+          example: null
     JobCreate:
       type: object
       required: [sku, inputs]
       properties:
-        sku: { type: string }
+        sku: { type: string, example: "triage-watch@v1" }
         inputs:
           type: object
           additionalProperties: true
+          example:
+            queue_url: "https://acme.example.com/support-queue"
+            priority_threshold: 8
         idempotency_key:
           type: string
           nullable: true
+          example: "client-req-2026-05-16-001"
     JobCreated:
       type: object
       required: [job_id, status]
       properties:
-        job_id: { type: string }
-        status: { type: string }
+        job_id: { type: string, example: "job_AbCdEf0123456789" }
+        status: { type: string, example: "queued" }
     JobList:
       type: object
       required: [jobs]
@@ -147,32 +158,72 @@ paths:
   /v1/jobs:
     post:
       summary: Submit a job
+      description: |
+        Submit a new job against a registered SKU. Returns 202 with a
+        `job_id` once the job is persisted and queued. Inputs are validated
+        against the SKU's JSON Schema before queue admission.
+
+        Pass an `idempotency_key` to safely retry the same submission;
+        a replay returns the original `job_id` without re-queuing.
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/JobCreate" }
+            examples:
+              triageWatch:
+                summary: Triage a support queue
+                value:
+                  sku: "triage-watch@v1"
+                  inputs:
+                    queue_url: "https://acme.example.com/support-queue"
+                    priority_threshold: 8
+                  idempotency_key: "client-req-2026-05-16-001"
+              campaignSwarm:
+                summary: Launch a multi-channel campaign
+                value:
+                  sku: "campaign-swarm@v1"
+                  inputs:
+                    brief: "Launch Q4 fleet automation campaign across SMB CTOs"
+                    audience_segment: "smb-cto-q4"
+                    channels: ["email", "linkedin"]
+                    max_outreach: 250
       responses:
         "202":
-          description: Accepted
+          description: Accepted — job queued for dispatch.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/JobCreated" }
+              examples:
+                queued:
+                  value:
+                    job_id: "job_AbCdEf0123456789"
+                    status: "queued"
         "400":
-          description: Bad request
+          description: Bad request — inputs failed JSON-Schema validation.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                missingRequired:
+                  value:
+                    error: "bad_inputs"
+                    detail: "catalog: invalid inputs for triage-watch@v1: missing properties: 'queue_url'"
         "401":
-          description: Unauthorized
+          description: Unauthorized — missing or invalid bearer token.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "404":
-          description: SKU not found
+          description: SKU not found.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                unknownSKU:
+                  value:
+                    error: "sku_not_found"
+                    detail: "catalog: sku not found: triage-watch@v99"
     get:
       summary: List jobs for the authenticated tenant
       parameters:
@@ -197,17 +248,39 @@ paths:
   /v1/jobs/{id}:
     get:
       summary: Fetch a single job
+      description: Returns the current state of a job. Cross-tenant reads return 404.
       parameters:
         - in: path
           name: id
           required: true
           schema: { type: string }
+          example: "job_AbCdEf0123456789"
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Job" }
+              examples:
+                running:
+                  summary: Job in progress
+                  value:
+                    id: "job_AbCdEf0123456789"
+                    status: "running"
+                    sku: "triage-watch@v1"
+                    submitted_at: "2026-05-16T12:00:00Z"
+                    updated_at: "2026-05-16T12:00:03Z"
+                succeeded:
+                  summary: Terminal — succeeded
+                  value:
+                    id: "job_AbCdEf0123456789"
+                    status: "succeeded"
+                    sku: "triage-watch@v1"
+                    submitted_at: "2026-05-16T12:00:00Z"
+                    updated_at: "2026-05-16T12:00:42Z"
+                    outputs:
+                      tickets_processed: 14
+                      escalated: 2
         "404":
           description: Not found
           content:
@@ -216,27 +289,41 @@ paths:
   /v1/jobs/{id}/cancel:
     post:
       summary: Cancel a job
+      description: |
+        Request cancellation of a job that has not reached a terminal
+        state. If the job is already running on the operator plane,
+        the dispatcher will best-effort-cancel the underlying task.
       parameters:
         - in: path
           name: id
           required: true
           schema: { type: string }
+          example: "job_AbCdEf0123456789"
       responses:
         "200":
           description: Cancelled
           content:
             application/json:
               schema: { $ref: "#/components/schemas/CancelResult" }
+              examples:
+                cancelled:
+                  value:
+                    status: "cancelled"
         "404":
           description: Not found
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "409":
-          description: Cannot cancel in current state
+          description: Cannot cancel in current state — job already terminal.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                alreadyTerminal:
+                  value:
+                    error: "conflict"
+                    detail: "job already terminal"
   /v1/skus:
     get:
       summary: List the global SKU catalog
