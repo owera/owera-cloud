@@ -27,15 +27,18 @@ compliance/
 │   ├── incident-response-policy.md
 │   ├── data-retention-policy.md
 │   ├── change-management-policy.md
-│   └── vendor-management-policy.md
+│   ├── vendor-management-policy.md
+│   └── lgpd-compliance-policy.md         (Owera-as-controller, DPO, Arts. 5/7/18/48)
 ├── runbooks/          How we execute the commitments
 │   ├── on-call-runbook.md
 │   ├── incident-response.md
 │   ├── customer-data-export.md
-│   └── customer-data-deletion.md
+│   ├── customer-data-deletion.md
+│   └── key-rotation.md                   (minisign + Stripe + Cloudflare quarterly)
 └── audit-controls/    The evidence layer
     ├── README.md
-    └── soc2-cc.yaml
+    ├── soc2-cc.yaml
+    └── evidence/                         (per-CC evidence files)
 ```
 
 Each policy ends with a **version block** — a markdown table tracking author, date, and changes. Policies are reviewed annually (calendar Q1) and on any material change to the cloud-plane architecture.
