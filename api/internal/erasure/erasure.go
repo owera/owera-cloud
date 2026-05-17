@@ -85,11 +85,11 @@ type PurgeReport struct {
 	RequestID          string         `json:"request_id"`
 	StartedAt          time.Time      `json:"started_at"`
 	CompletedAt        time.Time      `json:"completed_at"`
-	ScopesDeleted      []string       `json:"scopes_deleted"`       // e.g. ["jobs", "queue", "operator_payloads", "vector_store"]
-	ScopesRetained     map[string]any `json:"scopes_retained"`      // {"stripe_invoices": "5y_receita_federal", "audit_log": "tokenized"}
+	ScopesDeleted      []string       `json:"scopes_deleted"`  // e.g. ["jobs", "queue", "operator_payloads", "vector_store"]
+	ScopesRetained     map[string]any `json:"scopes_retained"` // {"stripe_invoices": "5y_receita_federal", "audit_log": "tokenized"}
 	BytesDeleted       int64          `json:"bytes_deleted"`
-	HashesBeforeAfter  map[string]any `json:"hashes_before_after"`  // {"jobs_table": {"before": "...", "after": "..."}}
-	VerificationStatus string         `json:"verification_status"`  // "pending" | "complete" | "failed"
+	HashesBeforeAfter  map[string]any `json:"hashes_before_after"` // {"jobs_table": {"before": "...", "after": "..."}}
+	VerificationStatus string         `json:"verification_status"` // "pending" | "complete" | "failed"
 }
 
 // Service is the request-side of erasure (called by the HTTP handler).
