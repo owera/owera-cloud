@@ -43,10 +43,10 @@ const (
 // and <secret> is the argon2-verified material. Display callers can show
 // "owc_<prefix>…" without exposing the secret tail.
 const (
-	tokenScheme     = "owc"
-	tokenPrefixLen  = 16 // base64 chars; ~96 bits of entropy in the lookup column
-	tokenSecretLen  = 32 // bytes of entropy in the verified tail
-	tokenSeparator  = "."
+	tokenScheme    = "owc"
+	tokenPrefixLen = 16 // base64 chars; ~96 bits of entropy in the lookup column
+	tokenSecretLen = 32 // bytes of entropy in the verified tail
+	tokenSeparator = "."
 )
 
 // Tenant is the unit of isolation. Every other row in the system has a
@@ -708,7 +708,7 @@ func verifySecret(secret, verifier string) (bool, error) {
 	if len(want) > math.MaxUint32 {
 		return false, fmt.Errorf("identity: verifier hash length %d exceeds uint32", len(want))
 	}
-	got := argon2.IDKey([]byte(secret), salt, t, m, p, uint32(len(want)))
+	got := argon2.IDKey([]byte(secret), salt, t, m, p, uint32(len(want))) // #nosec G115 -- bounded by MaxUint32 check above
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
 

@@ -15,10 +15,10 @@ import (
 // mockRPCServer is a single-method JSON-RPC server that returns canned
 // LedgerTail results based on the (taskID, cursor) pair.
 type mockRPCServer struct {
-	mu       sync.Mutex
-	calls    int
-	cursors  []string             // one entry per call, in order, for assertion
-	respond  func(int, string) ledgerTailResult
+	mu      sync.Mutex
+	calls   int
+	cursors []string // one entry per call, in order, for assertion
+	respond func(int, string) ledgerTailResult
 }
 
 func newMockRPCServer(t *testing.T, respond func(callIndex int, cursor string) ledgerTailResult) *httptest.Server {
@@ -94,6 +94,12 @@ func TestLedgerTailClient_NonTerminalThenComplete(t *testing.T) {
 	}
 	if term {
 		t.Errorf("call 1: expected non-terminal; got status=%q", status)
+	}
+	if outputs != nil {
+		t.Errorf("call 1: expected nil outputs, got %v", outputs)
+	}
+	if errMsg != "" {
+		t.Errorf("call 1: expected empty errMsg, got %q", errMsg)
 	}
 	if c.getCursor("tid") != t1.Format(time.RFC3339Nano) {
 		t.Errorf("cursor after call 1: got %q want %q", c.getCursor("tid"), t1.Format(time.RFC3339Nano))

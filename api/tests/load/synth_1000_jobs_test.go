@@ -130,7 +130,11 @@ func TestSynth1000Jobs(t *testing.T) {
 	disp := dispatcher.New(tr)
 	ledger := dispatcher.NewSyntheticLedgerPoller()
 
-	drainCtx, drainCancel := context.WithTimeout(ctx, 60*time.Second)
+	// Drain budget: macOS CI clears 1000 jobs in ~30s; Ubuntu CI runners
+	// are slower and routinely take 60-100s. 180s leaves headroom without
+	// masking real regressions — a true stall trips the timeout long
+	// before this budget expires.
+	drainCtx, drainCancel := context.WithTimeout(ctx, 180*time.Second)
 	defer drainCancel()
 
 	t1 := time.Now()

@@ -278,4 +278,3 @@ func TestRoundTrip_SKUsListed(t *testing.T) {
 		t.Fatalf("skus: got %d want 2; body=%s", len(out.SKUs), body)
 	}
 }
-

@@ -109,9 +109,9 @@ func TestOperatorFetcher_SKUStates(t *testing.T) {
 		Gateway: operatorGatewayHealth{OK: true},
 		Workers: []operatorWorkerHealth{{Node: "claw1.local", OK: true}},
 		SKUConformance: []operatorSKUConform{
-			{SKU: "marketing.fanout", P50LatencyMs: 50, P95LatencyMs: 200, ErrorRatePct: 0.1, SLATargetMs: 500},     // green
-			{SKU: "etl.local",        P50LatencyMs: 400, P95LatencyMs: 600, ErrorRatePct: 1.5, SLATargetMs: 500},   // yellow
-			{SKU: "llm.triage",       P50LatencyMs: 800, P95LatencyMs: 1200, ErrorRatePct: 7, SLATargetMs: 500},    // red
+			{SKU: "marketing.fanout", P50LatencyMs: 50, P95LatencyMs: 200, ErrorRatePct: 0.1, SLATargetMs: 500}, // green
+			{SKU: "etl.local", P50LatencyMs: 400, P95LatencyMs: 600, ErrorRatePct: 1.5, SLATargetMs: 500},       // yellow
+			{SKU: "llm.triage", P50LatencyMs: 800, P95LatencyMs: 1200, ErrorRatePct: 7, SLATargetMs: 500},       // red
 		},
 	}
 	snap := translate(op)

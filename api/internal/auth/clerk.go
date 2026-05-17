@@ -152,5 +152,8 @@ func (v *ClerkVerifier) Verify(ctx context.Context, token string) (*ClerkClaims,
 
 // RS256 is the algorithm Clerk publishes. We pin it explicitly so a
 // future Clerk-side change to ES256 surfaces as a config decision rather
-// than a silent upgrade.
+// than a silent upgrade. Referenced only by this doc comment today; the
+// next time we wire alg enforcement, the value is already at hand.
+//
+//nolint:unused
 var clerkSigningAlg = jwa.RS256

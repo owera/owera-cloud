@@ -53,7 +53,7 @@ func wrapItem(i *queue.Item) queueItem {
 	return &itemWrapper{inner: i}
 }
 
-func (w *itemWrapper) GetID() string                { return w.inner.ID }
-func (w *itemWrapper) GetTenantID() string          { return w.inner.TenantID }
-func (w *itemWrapper) GetJobID() string             { return w.inner.JobID }
-func (w *itemWrapper) GetPayload() map[string]any   { return w.inner.Payload }
+func (w *itemWrapper) GetID() string              { return w.inner.ID }
+func (w *itemWrapper) GetTenantID() string        { return w.inner.TenantID }
+func (w *itemWrapper) GetJobID() string           { return w.inner.JobID }
+func (w *itemWrapper) GetPayload() map[string]any { return w.inner.Payload }
