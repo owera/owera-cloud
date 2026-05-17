@@ -109,15 +109,21 @@ type ledgerTailResult struct {
 	Cursor  string        `json:"cursor"`
 }
 
-// Poll implements LedgerPoller. Returns (terminal, status, outputs,
-// errMsg, err). err is non-nil only for transport/protocol failures —
-// a non-existent task or empty result is "not terminal yet."
-func (c *LedgerTailClient) Poll(ctx context.Context, taskID string) (bool, jobs.Status, map[string]any, string, error) {
+// Poll implements LedgerPoller. Returns PollResult{Terminal, Status,
+// Outputs, ErrMsg, Bills}; err is non-nil only for transport/protocol
+// failures. A non-existent task or empty result is "not terminal yet,
+// no new bills."
+//
+// Bills carries every `phase: "bill"` entry seen in this poll window,
+// decoded from its Data payload. The worker fans them into the cloud
+// billing outbox in the same loop; outbox dedup makes redelivery on
+// cursor regression safe.
+func (c *LedgerTailClient) Poll(ctx context.Context, taskID string) (PollResult, error) {
 	cursor := c.getCursor(taskID)
 
 	res, err := c.call(ctx, taskID, cursor)
 	if err != nil {
-		return false, "", nil, "", err
+		return PollResult{}, err
 	}
 	// Advance cursor regardless of whether we found a terminal — empty
 	// tails keep the same cursor anyway.
@@ -125,17 +131,53 @@ func (c *LedgerTailClient) Poll(ctx context.Context, taskID string) (bool, jobs.
 		c.setCursor(taskID, res.Cursor)
 	}
 
-	// Walk entries; first terminal wins. The operator plane writes
-	// entries in order, so iteration order matches Ts order.
+	out := PollResult{}
+
+	// Walk entries; surface bills as a batch, and the first terminal wins
+	// for lifecycle transition. The operator plane writes entries in
+	// order, so iteration order matches Ts order.
 	for _, e := range res.Entries {
+		if e.Phase == "bill" {
+			if be, ok := parseBillEntry(e); ok {
+				out.Bills = append(out.Bills, be)
+			}
+			continue
+		}
+		if out.Terminal {
+			// We already found a terminal earlier in this batch; keep
+			// scanning so any trailing bill entries (operator emits
+			// bill→complete or complete→bill ordering is not guaranteed)
+			// are still captured. Don't overwrite the terminal fields.
+			continue
+		}
 		status, isTerminal := mapPhaseToStatus(e.Phase)
 		if !isTerminal {
 			continue
 		}
 		outputs, errMsg := extractOutputsAndError(e)
-		return true, status, outputs, errMsg, nil
+		out.Terminal = true
+		out.Status = status
+		out.Outputs = outputs
+		out.ErrMsg = errMsg
 	}
-	return false, "", nil, "", nil
+	return out, nil
+}
+
+// parseBillEntry decodes the Data payload of a `phase: "bill"` ledger
+// entry into a BillEntry, copying the task_id, tenant_id, and entry-Ts
+// from the envelope. Returns (zero, false) on malformed data so the
+// caller can skip rather than fail the whole poll cycle.
+func parseBillEntry(e ledgerEntry) (BillEntry, bool) {
+	var be BillEntry
+	if len(e.Data) > 0 {
+		if err := json.Unmarshal(e.Data, &be); err != nil {
+			return BillEntry{}, false
+		}
+	}
+	be.TaskID = e.TaskID
+	be.TenantID = e.TenantID
+	be.Ts = e.Ts
+	return be, true
 }
 
 // call issues one JSON-RPC fleet.LedgerTail and returns the result.

@@ -88,39 +88,39 @@ func TestLedgerTailClient_NonTerminalThenComplete(t *testing.T) {
 	c := NewLedgerTailClient(srv.URL, nil)
 
 	// First poll — non-terminal.
-	term, status, outputs, errMsg, err := c.Poll(context.Background(), "tid")
+	res, err := c.Poll(context.Background(), "tid")
 	if err != nil {
 		t.Fatalf("Poll 1: %v", err)
 	}
-	if term {
-		t.Errorf("call 1: expected non-terminal; got status=%q", status)
+	if res.Terminal {
+		t.Errorf("call 1: expected non-terminal; got status=%q", res.Status)
 	}
-	if outputs != nil {
-		t.Errorf("call 1: expected nil outputs, got %v", outputs)
+	if res.Outputs != nil {
+		t.Errorf("call 1: expected nil outputs, got %v", res.Outputs)
 	}
-	if errMsg != "" {
-		t.Errorf("call 1: expected empty errMsg, got %q", errMsg)
+	if res.ErrMsg != "" {
+		t.Errorf("call 1: expected empty errMsg, got %q", res.ErrMsg)
 	}
 	if c.getCursor("tid") != t1.Format(time.RFC3339Nano) {
 		t.Errorf("cursor after call 1: got %q want %q", c.getCursor("tid"), t1.Format(time.RFC3339Nano))
 	}
 
 	// Second poll — terminal + outputs.
-	term, status, outputs, errMsg, err = c.Poll(context.Background(), "tid")
+	res, err = c.Poll(context.Background(), "tid")
 	if err != nil {
 		t.Fatalf("Poll 2: %v", err)
 	}
-	if !term {
+	if !res.Terminal {
 		t.Errorf("call 2: expected terminal")
 	}
-	if status != jobs.StatusSucceeded {
-		t.Errorf("status: got %q want %q", status, jobs.StatusSucceeded)
+	if res.Status != jobs.StatusSucceeded {
+		t.Errorf("status: got %q want %q", res.Status, jobs.StatusSucceeded)
 	}
-	if outputs["tickets_handled"].(float64) != 5 {
-		t.Errorf("outputs: got %v want tickets_handled=5", outputs)
+	if res.Outputs["tickets_handled"].(float64) != 5 {
+		t.Errorf("outputs: got %v want tickets_handled=5", res.Outputs)
 	}
-	if errMsg != "" {
-		t.Errorf("errMsg: got %q want empty", errMsg)
+	if res.ErrMsg != "" {
+		t.Errorf("errMsg: got %q want empty", res.ErrMsg)
 	}
 }
 
@@ -141,18 +141,18 @@ func TestLedgerTailClient_FailedPhase(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := NewLedgerTailClient(srv.URL, nil)
-	term, status, _, errMsg, err := c.Poll(context.Background(), "tid")
+	res, err := c.Poll(context.Background(), "tid")
 	if err != nil {
 		t.Fatalf("Poll: %v", err)
 	}
-	if !term {
+	if !res.Terminal {
 		t.Fatal("expected terminal")
 	}
-	if status != jobs.StatusFailed {
-		t.Errorf("status: got %q want %q", status, jobs.StatusFailed)
+	if res.Status != jobs.StatusFailed {
+		t.Errorf("status: got %q want %q", res.Status, jobs.StatusFailed)
 	}
-	if errMsg != "ssh: connection refused" {
-		t.Errorf("errMsg: got %q", errMsg)
+	if res.ErrMsg != "ssh: connection refused" {
+		t.Errorf("errMsg: got %q", res.ErrMsg)
 	}
 }
 
@@ -168,7 +168,7 @@ func TestLedgerTailClient_RPCError(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := NewLedgerTailClient(srv.URL, nil)
-	_, _, _, _, err := c.Poll(context.Background(), "tid")
+	_, err := c.Poll(context.Background(), "tid")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -183,11 +183,11 @@ func TestLedgerTailClient_EmptyResultNotTerminal(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := NewLedgerTailClient(srv.URL, nil)
-	term, _, _, _, err := c.Poll(context.Background(), "tid")
+	res, err := c.Poll(context.Background(), "tid")
 	if err != nil {
 		t.Fatalf("Poll: %v", err)
 	}
-	if term {
+	if res.Terminal {
 		t.Errorf("expected non-terminal on empty result")
 	}
 }

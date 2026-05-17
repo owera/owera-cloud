@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/owera/owera-cloud/api/internal/billing"
 	"github.com/owera/owera-cloud/api/internal/jobs"
 	"github.com/owera/owera-cloud/api/internal/queue"
 )
@@ -19,14 +20,66 @@ type JobStore interface {
 	Transition(ctx context.Context, tenantID, id string, to jobs.Status, opts ...jobs.TransitionOpt) (*jobs.Job, error)
 }
 
+// PollResult is the structured return shape of LedgerPoller.Poll. It
+// extends the pre-WS-A.1 (terminal, status, outputs, errMsg) tuple with
+// a Bills slice carrying any `phase: "bill"` entries seen in the same
+// poll window. The worker hands those off to BillRecorder so the
+// operator-plane bill markers end up in the cloud's billing outbox
+// (WS-A.1: closes the gap that left billing_outbox empty even though
+// the operator-plane ledger had a bill entry).
+//
+// Walking entries in the same Poll call (rather than a separate
+// PollBills method) is load-bearing: each successful Poll advances the
+// per-task cursor in the production LedgerTailClient, so a second
+// "bills-only" RPC would return an empty entry set. WS-B's
+// long-running SKUs (e.g. monthly-subscription triage-watch emitting
+// per-tick bill events outside any single worker poll cycle) will need
+// a separate persistent subscriber; tracked in ROADMAP.md.
+type PollResult struct {
+	Terminal bool
+	Status   jobs.Status
+	Outputs  map[string]any
+	ErrMsg   string
+	// Bills is the per-poll batch of `phase: "bill"` entries. The
+	// worker translates each into a billing.LedgerEvent and hands it to
+	// BillRecorder.Record.
+	Bills []BillEntry
+}
+
+// BillEntry is the cloud-side projection of an operator-plane
+// `phase: "bill"` ledger entry, parsed out of its Data payload. The
+// shape mirrors operator-plane `skus.BillEvent` (docs/sku-execution-spec.md
+// "Billing-emission contract") plus the (TaskID, TenantID, Ts) the
+// ledger entry stamps directly.
+type BillEntry struct {
+	TaskID       string
+	TenantID     string
+	Ts           time.Time // entry-level timestamp; used to derive a stable EntryID
+	SKU          string    `json:"sku"`
+	Meter        string    `json:"meter"`
+	Units        int64     `json:"units"`
+	OneShotCents int64     `json:"one_shot_cents,omitempty"`
+	OccurredAt   time.Time `json:"occurred_at"`
+}
+
 // LedgerPoller asks the operator plane whether a previously-dispatched
 // task has reached a terminal state. The production implementation calls
 // fleet.LedgerTail over the Cloudflare tunnel; the in-memory transport's
-// default responder simulates immediate success. See TL open question in
-// the PR body about whether the operator plane should expose
-// fleet.LedgerTail vs. fleet.LedgerFetch.
+// default responder simulates immediate success.
+//
+// Poll also surfaces `phase: "bill"` entries via PollResult.Bills so
+// the worker can fan them into the cloud's billing outbox in the same
+// loop that follows terminal state.
 type LedgerPoller interface {
-	Poll(ctx context.Context, operatorTaskID string) (terminal bool, status jobs.Status, outputs map[string]any, errMsg string, err error)
+	Poll(ctx context.Context, operatorTaskID string) (PollResult, error)
+}
+
+// BillRecorder is the subset of billing.Service the worker calls to
+// stash a bill marker in the outbox. Narrow interface so tests can pass
+// a recording double without spinning up a SQLite DB. nil is the
+// "no billing wired" sentinel — callers must guard.
+type BillRecorder interface {
+	Record(ctx context.Context, ev billing.LedgerEvent) error
 }
 
 // WorkerConfig tunes the dispatcher worker loop.
@@ -57,17 +110,20 @@ type Worker struct {
 	d      *Dispatcher
 	js     JobStore
 	ledger LedgerPoller
+	bills  BillRecorder // nil-safe; when nil, bill entries are still parsed but not recorded
 	cfg    WorkerConfig
 }
 
 // NewWorker constructs a worker. ledger may be nil for tests that only
 // exercise the dispatch path; in that case the worker advances the job to
-// "running" and stops there.
-func NewWorker(q queue.Queue, d *Dispatcher, js JobStore, ledger LedgerPoller, cfg WorkerConfig) *Worker {
+// "running" and stops there. bills may also be nil — when set, the worker
+// fans `phase: "bill"` ledger entries from each poll into the cloud's
+// billing outbox via BillRecorder.Record.
+func NewWorker(q queue.Queue, d *Dispatcher, js JobStore, ledger LedgerPoller, bills BillRecorder, cfg WorkerConfig) *Worker {
 	if cfg.ClaimToken == "" {
 		cfg = DefaultWorkerConfig()
 	}
-	return &Worker{q: q, d: d, js: js, ledger: ledger, cfg: cfg}
+	return &Worker{q: q, d: d, js: js, ledger: ledger, bills: bills, cfg: cfg}
 }
 
 // Run loops until ctx is cancelled. Errors from individual jobs are
@@ -144,19 +200,23 @@ func (w *Worker) followTask(ctx context.Context, tenantID, jobID, taskID string)
 				jobs.WithError("ledger wait exceeded"))
 			return fmt.Errorf("worker: ledger wait exceeded for %s", taskID)
 		}
-		terminal, status, outputs, errMsg, err := w.ledger.Poll(ctx, taskID)
+		res, err := w.ledger.Poll(ctx, taskID)
 		if err != nil {
 			return fmt.Errorf("worker: ledger poll: %w", err)
 		}
-		if terminal {
+		// Drain any `phase: "bill"` entries seen in this poll window into
+		// the billing outbox. Outbox insert dedupes on EntryID so retries
+		// (cursor regression on restart, redelivery, …) are safe.
+		w.recordBills(ctx, tenantID, res.Bills)
+		if res.Terminal {
 			opts := []jobs.TransitionOpt{}
-			if outputs != nil {
-				opts = append(opts, jobs.WithOutputs(outputs))
+			if res.Outputs != nil {
+				opts = append(opts, jobs.WithOutputs(res.Outputs))
 			}
-			if errMsg != "" {
-				opts = append(opts, jobs.WithError(errMsg))
+			if res.ErrMsg != "" {
+				opts = append(opts, jobs.WithError(res.ErrMsg))
 			}
-			_, err := w.js.Transition(ctx, tenantID, jobID, status, opts...)
+			_, err := w.js.Transition(ctx, tenantID, jobID, res.Status, opts...)
 			return err
 		}
 		select {
@@ -165,6 +225,66 @@ func (w *Worker) followTask(ctx context.Context, tenantID, jobID, taskID string)
 		case <-time.After(w.cfg.LedgerBackoff):
 		}
 	}
+}
+
+// recordBills fans the per-poll bill batch into the billing outbox.
+// Errors are logged but never propagate — losing the worker because
+// SQLite is momentarily busy would also fail the ledger transition and
+// (worse) leak the queue lease. The outbox UNIQUE(entry_id) and the
+// operator plane's at-least-once redelivery on reconnect make the
+// next poll-cycle a self-healing retry path.
+func (w *Worker) recordBills(ctx context.Context, jobTenantID string, bills []BillEntry) {
+	if w.bills == nil || len(bills) == 0 {
+		return
+	}
+	for _, b := range bills {
+		tenantID := b.TenantID
+		if tenantID == "" {
+			// Operator-plane stamps tenant_id on bill entries (per WS-A
+			// contract), but older entries pre-dating that field may
+			// arrive blank — fall back to the job's tenant so the
+			// outbox row is still attributable.
+			tenantID = jobTenantID
+		}
+		entryID := buildBillEntryID(b)
+		ts := b.OccurredAt
+		if ts.IsZero() {
+			ts = b.Ts
+		}
+		ev := billing.LedgerEvent{
+			EntryID:  entryID,
+			TaskID:   b.TaskID,
+			TenantID: tenantID,
+			SKU:      b.SKU,
+			Result:   "bill", // gates Service.Record's accept-list
+			Units:    b.Units,
+			Meter:    b.Meter,
+			Ts:       ts,
+		}
+		if err := w.bills.Record(ctx, ev); err != nil {
+			log.Printf("dispatcher: worker bill record err task=%s entry=%s: %v", b.TaskID, entryID, err)
+			continue
+		}
+		log.Printf("dispatcher: worker recorded bill entry_id=%s task=%s tenant=%s sku=%s meter=%s units=%d",
+			entryID, b.TaskID, tenantID, b.SKU, b.Meter, b.Units)
+	}
+}
+
+// buildBillEntryID derives a stable, deterministic outbox key for a
+// bill entry. The operator-plane ledger does not assign per-entry IDs
+// over the wire (the on-disk `<task_id>.jsonl` line offset is the
+// internal anchor and is NOT exposed via fleet.LedgerTail), so we hash
+// (task_id, entry-Ts) into a token that survives cursor regressions
+// and worker restarts. Ts is RFC3339Nano-stable from the operator
+// signer; the outbox UNIQUE(entry_id) dedupes any same-event
+// redelivery. SKU+Meter are included so distinct bill emits within
+// the same ledger Ts (rare but legal) don't collide.
+func buildBillEntryID(b BillEntry) string {
+	ts := b.Ts
+	if ts.IsZero() {
+		ts = b.OccurredAt
+	}
+	return fmt.Sprintf("%s:%s:%s:%s", b.TaskID, ts.UTC().Format(time.RFC3339Nano), b.SKU, b.Meter)
 }
 
 // SyntheticLedgerPoller is a test LedgerPoller that returns
@@ -186,11 +306,15 @@ func NewSyntheticLedgerPoller() *SyntheticLedgerPoller {
 }
 
 // Poll implements LedgerPoller.
-func (s *SyntheticLedgerPoller) Poll(_ context.Context, taskID string) (bool, jobs.Status, map[string]any, string, error) {
+func (s *SyntheticLedgerPoller) Poll(_ context.Context, taskID string) (PollResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls[taskID]++
-	return true, s.Status, map[string]any{"task_id": taskID, "synthetic": true}, "", nil
+	return PollResult{
+		Terminal: true,
+		Status:   s.Status,
+		Outputs:  map[string]any{"task_id": taskID, "synthetic": true},
+	}, nil
 }
 
 // Calls returns how many times Poll has been called for taskID.

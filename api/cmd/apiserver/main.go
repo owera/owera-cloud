@@ -223,7 +223,12 @@ func run(addr, dbPath string) error {
 
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	defer workerCancel()
-	worker := dispatcher.NewWorker(q, disp, jobsStore, w.ledger, dispatcher.DefaultWorkerConfig())
+	// billingSvc doubles as the dispatcher.BillRecorder: the worker hands
+	// every `phase: "bill"` ledger entry to billing.Service.Record so the
+	// outbox flusher below can ship it to Stripe on the next tick. This
+	// closes the WS-A.1 gap where bill markers existed in the operator
+	// plane ledger but never landed in billing_outbox.
+	worker := dispatcher.NewWorker(q, disp, jobsStore, w.ledger, billingSvc, dispatcher.DefaultWorkerConfig())
 	go worker.Run(workerCtx)
 
 	// Outbox flusher: ticks the billing service's Reconcile, which drains

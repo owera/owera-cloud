@@ -54,7 +54,7 @@ func TestWorker_HappyPath_EndToEnd(t *testing.T) {
 	cfg := DefaultWorkerConfig()
 	cfg.ClaimToken = "worker-test"
 	cfg.LedgerBackoff = time.Millisecond
-	w := NewWorker(q, d, js, NewSyntheticLedgerPoller(), cfg)
+	w := NewWorker(q, d, js, NewSyntheticLedgerPoller(), nil, cfg)
 
 	if err := w.RunOnce(ctx); err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -88,7 +88,7 @@ func TestWorker_DispatchError_MarksJobFailed(t *testing.T) {
 	d := New(tr)
 	cfg := DefaultWorkerConfig()
 	cfg.ClaimToken = "worker-test"
-	w := NewWorker(q, d, js, NewSyntheticLedgerPoller(), cfg)
+	w := NewWorker(q, d, js, NewSyntheticLedgerPoller(), nil, cfg)
 
 	_ = w.RunOnce(ctx)
 
@@ -113,7 +113,7 @@ func TestWorker_AlreadyTerminalJob_AcksWithoutDispatch(t *testing.T) {
 	d := New(tr)
 	cfg := DefaultWorkerConfig()
 	cfg.ClaimToken = "worker-test"
-	w := NewWorker(q, d, js, NewSyntheticLedgerPoller(), cfg)
+	w := NewWorker(q, d, js, NewSyntheticLedgerPoller(), nil, cfg)
 
 	if err := w.RunOnce(ctx); err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -129,7 +129,7 @@ func TestWorker_AlreadyTerminalJob_AcksWithoutDispatch(t *testing.T) {
 func TestWorker_EmptyQueue_ReturnsErrEmpty(t *testing.T) {
 	q, js, _ := newWorkerFixture(t)
 	d := New(NewInMemoryTransport())
-	w := NewWorker(q, d, js, NewSyntheticLedgerPoller(), WorkerConfig{ClaimToken: "w"})
+	w := NewWorker(q, d, js, NewSyntheticLedgerPoller(), nil, WorkerConfig{ClaimToken: "w"})
 	err := w.RunOnce(context.Background())
 	if !errors.Is(err, queue.ErrEmpty) {
 		t.Fatalf("expected queue.ErrEmpty, got %v", err)

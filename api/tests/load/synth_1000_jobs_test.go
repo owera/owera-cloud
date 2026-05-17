@@ -147,7 +147,7 @@ func TestSynth1000Jobs(t *testing.T) {
 			LedgerBackoff: time.Millisecond,
 			MaxLedgerWait: 30 * time.Second,
 		}
-		worker := dispatcher.NewWorker(q, disp, js, ledger, cfg)
+		worker := dispatcher.NewWorker(q, disp, js, ledger, nil, cfg)
 		drainWG.Add(1)
 		go func() {
 			defer drainWG.Done()

@@ -71,7 +71,7 @@ func newHarness(t *testing.T) *harness {
 	cfg := dispatcher.DefaultWorkerConfig()
 	cfg.ClaimToken = "worker-integration"
 	cfg.LedgerBackoff = time.Millisecond
-	w := dispatcher.NewWorker(q, disp, js, ledger, cfg)
+	w := dispatcher.NewWorker(q, disp, js, ledger, bs, cfg)
 
 	h := server.New(server.Deps{
 		Identity:   id,
