@@ -79,6 +79,8 @@ func registerAdmin(r chi.Router, d Deps) {
 		r.Post("/tenants/{tenantID}/users", adminCreateUser(d))
 		r.Post("/tenants/{tenantID}/stripe-customer", adminSetStripeCustomer(d))
 		r.Post("/tenants/{tenantID}/cap", adminSetCap(d))
+		r.Post("/tenants/{tenantID}/clerk-org", adminSetClerkOrg(d))
+		r.Post("/tenants/{tenantID}/users/{userID}/clerk-user", adminSetClerkUser(d))
 	})
 }
 
@@ -253,6 +255,71 @@ func adminSetCap(d Deps) http.HandlerFunc {
 			return
 		}
 		recordAdminAudit(r, d, tenantID, "admin.tenant.set_cap", strconv.FormatInt(req.MonthlyCapCents, 10))
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+type adminSetClerkOrgReq struct {
+	ClerkOrgID string `json:"clerk_org_id"`
+}
+
+// adminSetClerkOrg binds a tenant to a Clerk Organisation id (org_...).
+// After this call, JWTs from that Clerk org resolve to the tenant via
+// the auth middleware's Clerk path.
+func adminSetClerkOrg(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tenantID := chi.URLParam(r, "tenantID")
+		var req adminSetClerkOrgReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		if req.ClerkOrgID == "" {
+			writeErr(w, http.StatusBadRequest, "bad_request", "clerk_org_id required")
+			return
+		}
+		if err := d.Identity.SetClerkOrgID(r.Context(), tenantID, req.ClerkOrgID); err != nil {
+			if errors.Is(err, identity.ErrNotFound) {
+				writeErr(w, http.StatusNotFound, "tenant_not_found", err.Error())
+				return
+			}
+			writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		recordAdminAudit(r, d, tenantID, "admin.tenant.set_clerk_org", req.ClerkOrgID)
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+type adminSetClerkUserReq struct {
+	ClerkUserID string `json:"clerk_user_id"`
+}
+
+// adminSetClerkUser binds a user row to a Clerk subject id (user_...).
+// After this call, dashboard JWTs with this subject claim resolve to
+// the user via the auth middleware's Clerk path.
+func adminSetClerkUser(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tenantID := chi.URLParam(r, "tenantID")
+		userID := chi.URLParam(r, "userID")
+		var req adminSetClerkUserReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		if req.ClerkUserID == "" {
+			writeErr(w, http.StatusBadRequest, "bad_request", "clerk_user_id required")
+			return
+		}
+		if err := d.Identity.SetClerkUserID(r.Context(), tenantID, userID, req.ClerkUserID); err != nil {
+			if errors.Is(err, identity.ErrNotFound) {
+				writeErr(w, http.StatusNotFound, "user_not_found", err.Error())
+				return
+			}
+			writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		recordAdminAudit(r, d, tenantID, "admin.tenant.user.set_clerk_user", req.ClerkUserID)
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
