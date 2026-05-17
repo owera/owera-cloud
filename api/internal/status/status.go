@@ -42,9 +42,20 @@ type SKUSLAStatus struct {
 	State           string  `json:"state"`
 }
 
+// Fetcher pulls one fresh snapshot from the operator plane. Production
+// uses [NewOperatorFetcher], which translates the operator's
+// fleet.HealthSnapshot wire schema into the cloud-side [Snapshot]. The
+// Service falls back to the legacy "decode through Transport" path when
+// no Fetcher is supplied — that path is still used by tests that wire
+// an InMemoryTransport seeded with a matching Snapshot Responder.
+type Fetcher interface {
+	Fetch(ctx context.Context) (*Snapshot, error)
+}
+
 // Service is the status snapshot generator.
 type Service struct {
 	transport Transport
+	fetcher   Fetcher
 	mu        sync.RWMutex
 	last      *Snapshot
 	lastAt    time.Time
@@ -60,6 +71,18 @@ func New(transport Transport, cacheFor time.Duration) *Service {
 	return &Service{transport: transport, cacheFor: cacheFor}
 }
 
+// NewWithFetcher returns a Service whose snapshots come from fetcher
+// rather than a raw Transport. Used in production so the cloud-side
+// schema mismatch with the operator's HealthSnapshot is translated
+// rather than silently zeroed out (which would always flip /readyz to
+// 503).
+func NewWithFetcher(fetcher Fetcher, cacheFor time.Duration) *Service {
+	if cacheFor <= 0 {
+		cacheFor = 30 * time.Second
+	}
+	return &Service{fetcher: fetcher, cacheFor: cacheFor}
+}
+
 // Get returns the current snapshot, refreshing if the cache is stale.
 func (s *Service) Get(ctx context.Context) (*Snapshot, error) {
 	s.mu.RLock()
@@ -70,21 +93,32 @@ func (s *Service) Get(ctx context.Context) (*Snapshot, error) {
 	}
 	s.mu.RUnlock()
 
-	if s.transport == nil {
-		return nil, errors.New("status: no transport configured")
-	}
-	var snap Snapshot
-	if err := s.transport.Call(ctx, "fleet.HealthSnapshot", nil, &snap); err != nil {
-		return nil, fmt.Errorf("status: fetch: %w", err)
+	var snap *Snapshot
+	switch {
+	case s.fetcher != nil:
+		got, err := s.fetcher.Fetch(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("status: fetch: %w", err)
+		}
+		snap = got
+	case s.transport != nil:
+		var raw Snapshot
+		if err := s.transport.Call(ctx, "fleet.HealthSnapshot", nil, &raw); err != nil {
+			return nil, fmt.Errorf("status: fetch: %w", err)
+		}
+		snap = &raw
+	default:
+		return nil, errors.New("status: no transport or fetcher configured")
 	}
 	if snap.GeneratedAt.IsZero() {
 		snap.GeneratedAt = time.Now().UTC()
 	}
 	s.mu.Lock()
-	s.last = &snap
+	s.last = snap
 	s.lastAt = time.Now()
 	s.mu.Unlock()
-	return &snap, nil
+	out := *snap
+	return &out, nil
 }
 
 // Ready returns true if the most recent snapshot reports the fleet as

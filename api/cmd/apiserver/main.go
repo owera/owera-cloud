@@ -55,14 +55,17 @@ func main() {
 // wiring captures the env-driven backend choices so run() and the tests
 // can describe them with one log line.
 type wiring struct {
-	billing      billing.Backend
-	billingLabel string // "stripe" | "fake"
-	portal       server.BillingPortalMinter
-	ledger       dispatcher.LedgerPoller
-	ledgerLabel  string // "tunnel (<url>)" | "synthetic"
-	clerk        auth.ClerkAuthenticator
-	clerkLabel   string // "clerk (<issuer>)" | "disabled"
-	defaultCap   int64  // monthly cost cap when tenant has no override
+	billing       billing.Backend
+	billingLabel  string // "stripe" | "fake"
+	portal        server.BillingPortalMinter
+	ledger        dispatcher.LedgerPoller
+	ledgerLabel   string // "tunnel (<url>)" | "synthetic"
+	transport     dispatcher.Transport
+	statusFetcher status.Fetcher // nil → fall back to transport-decode path
+	rpcLabel      string         // "tunnel (<url>)" | "in-memory"
+	clerk         auth.ClerkAuthenticator
+	clerkLabel    string // "clerk (<issuer>)" | "disabled"
+	defaultCap    int64  // monthly cost cap when tenant has no override
 }
 
 // chooseWiring resolves env-driven production vs dev backends. idStore
@@ -88,6 +91,8 @@ func chooseWiring(idStore *identity.Store) (wiring, error) {
 		billingLabel: "fake",
 		ledger:       dispatcher.NewSyntheticLedgerPoller(),
 		ledgerLabel:  "synthetic",
+		transport:    dispatcher.NewInMemoryTransport(),
+		rpcLabel:     "in-memory",
 		clerkLabel:   "disabled",
 		defaultCap:   defaultCapCentsFromEnv(),
 	}
@@ -109,6 +114,10 @@ func chooseWiring(idStore *identity.Store) (wiring, error) {
 	if url := os.Getenv("OPERATOR_RPC_URL"); url != "" {
 		w.ledger = dispatcher.NewLedgerTailClient(url, nil)
 		w.ledgerLabel = "tunnel (" + url + ")"
+		httpTransport := dispatcher.NewHTTPTransport(url, nil)
+		w.transport = httpTransport
+		w.statusFetcher = status.NewOperatorFetcher(httpTransport)
+		w.rpcLabel = "tunnel (" + url + ")"
 	}
 
 	if iss := os.Getenv("CLERK_JWT_ISSUER"); iss != "" {
@@ -162,8 +171,8 @@ func run(addr, dbPath string) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("apiserver: billing=%s, ledger=%s, auth=%s, default_cap_cents=%d",
-		w.billingLabel, w.ledgerLabel, w.clerkLabel, w.defaultCap)
+	log.Printf("apiserver: billing=%s, ledger=%s, rpc=%s, auth=%s, default_cap_cents=%d",
+		w.billingLabel, w.ledgerLabel, w.rpcLabel, w.clerkLabel, w.defaultCap)
 
 	billingSvc, err := billing.New(idStore.DB(), w.billing)
 	if err != nil {
@@ -185,9 +194,13 @@ func run(addr, dbPath string) error {
 	if err != nil {
 		return err
 	}
-	transport := dispatcher.NewInMemoryTransport()
-	disp := dispatcher.New(transport)
-	statusSvc := status.New(transport, 30*time.Second)
+	disp := dispatcher.New(w.transport)
+	var statusSvc *status.Service
+	if w.statusFetcher != nil {
+		statusSvc = status.NewWithFetcher(w.statusFetcher, 30*time.Second)
+	} else {
+		statusSvc = status.New(w.transport, 30*time.Second)
+	}
 
 	deps := server.Deps{
 		Identity:    idStore,
