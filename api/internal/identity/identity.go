@@ -56,20 +56,31 @@ const (
 // [Store.SetStripeCustomerID]; once set, the Stripe-side cus_... is the
 // recipient for meter_event payloads (T16.3) and Customer Portal sessions
 // (T16.2).
+//
+// ClerkOrgID is empty until the dashboard onboarding flow associates the
+// tenant with a Clerk Organisation. Once set, the auth middleware resolves
+// Clerk JWTs (whose `org_id` claim carries this value) back to this tenant.
 type Tenant struct {
 	ID               string
 	Name             string
 	CreatedAt        time.Time
 	StripeCustomerID string
+	ClerkOrgID       string
 }
 
 // User is a human (or system account) inside a tenant. Users may hold
 // multiple API keys.
+//
+// ClerkUserID is empty until the user signs in to the dashboard for the
+// first time and the onboarding flow binds the Clerk subject (`user_...`)
+// to this row. The auth middleware resolves Clerk JWT `sub` claims through
+// this column.
 type User struct {
-	ID        string
-	TenantID  string
-	Email     string
-	CreatedAt time.Time
+	ID          string
+	TenantID    string
+	Email       string
+	CreatedAt   time.Time
+	ClerkUserID string
 }
 
 // APIKey is a bearer credential. The plaintext token is only ever returned
@@ -142,21 +153,35 @@ func (s *Store) migrate() error {
 			name                TEXT NOT NULL,
 			created_at          DATETIME NOT NULL,
 			stripe_customer_id  TEXT,
+			clerk_org_id        TEXT,
 			monthly_cap_cents   INTEGER
 		)`,
 		// Idempotent column adds for existing databases — SQLite does not
-		// support IF NOT EXISTS on ALTER, so the duplicate-column error is
-		// swallowed inside migrate. APE-3 added monthly_cap_cents; coexists
-		// with the earlier stripe_customer_id ALTER.
+		// support IF NOT EXISTS on ALTER, so the duplicate-column error
+		// is swallowed in the loop below. Adds from both APE-3 (cap) and
+		// IDE-2 (clerk) coexist on this list.
 		`ALTER TABLE tenants ADD COLUMN stripe_customer_id TEXT`,
+		`ALTER TABLE tenants ADD COLUMN clerk_org_id TEXT`,
 		`ALTER TABLE tenants ADD COLUMN monthly_cap_cents INTEGER`,
+		// Partial unique index: at most one tenant per non-null
+		// clerk_org_id. NULLs are allowed in unlimited quantity so
+		// pre-onboarding tenants don't collide.
+		`CREATE UNIQUE INDEX IF NOT EXISTS tenants_clerk_org_uq
+		   ON tenants(clerk_org_id) WHERE clerk_org_id IS NOT NULL`,
 		`CREATE TABLE IF NOT EXISTS users (
-			id          TEXT PRIMARY KEY,
-			tenant_id   TEXT NOT NULL REFERENCES tenants(id),
-			email       TEXT NOT NULL,
-			created_at  DATETIME NOT NULL
+			id            TEXT PRIMARY KEY,
+			tenant_id     TEXT NOT NULL REFERENCES tenants(id),
+			email         TEXT NOT NULL,
+			created_at    DATETIME NOT NULL,
+			clerk_user_id TEXT
 		)`,
+		`ALTER TABLE users ADD COLUMN clerk_user_id TEXT`,
 		`CREATE INDEX IF NOT EXISTS users_tenant_idx ON users(tenant_id)`,
+		// Partial unique index: a Clerk subject id maps to exactly one
+		// user row. NULLs are unconstrained so pre-onboarding users
+		// don't collide.
+		`CREATE UNIQUE INDEX IF NOT EXISTS users_clerk_user_uq
+		   ON users(clerk_user_id) WHERE clerk_user_id IS NOT NULL`,
 		// prefix is the lookup index; verifier is the argon2id-encoded hash
 		// (PHC string form: $argon2id$v=19$m=...,t=...,p=...$salt$hash).
 		`CREATE TABLE IF NOT EXISTS api_keys (
@@ -208,9 +233,12 @@ func (s *Store) CreateTenant(ctx context.Context, name string) (*Tenant, error) 
 // GetTenant looks up a tenant by ID.
 func (s *Store) GetTenant(ctx context.Context, id string) (*Tenant, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id,name,created_at,COALESCE(stripe_customer_id,'') FROM tenants WHERE id=?`, id)
+		`SELECT id,name,created_at,
+		        COALESCE(stripe_customer_id,''),
+		        COALESCE(clerk_org_id,'')
+		   FROM tenants WHERE id=?`, id)
 	var t Tenant
-	if err := row.Scan(&t.ID, &t.Name, &t.CreatedAt, &t.StripeCustomerID); err != nil {
+	if err := row.Scan(&t.ID, &t.Name, &t.CreatedAt, &t.StripeCustomerID, &t.ClerkOrgID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -320,6 +348,111 @@ func (s *Store) StripeCustomerID(ctx context.Context, tenantID string) (string, 
 	return cust, nil
 }
 
+// SetClerkOrgID associates a Clerk Organisation (org_...) with the tenant.
+// Idempotent — re-setting the same value is a no-op; switching it
+// overwrites the prior value. Dashboard onboarding (WS-15) calls this once
+// per customer after the Clerk org is provisioned. The middleware's Clerk
+// JWT path uses this column to resolve the JWT's `org_id` claim back to a
+// tenant_id; tenants with no Clerk org cannot drive dashboard requests.
+func (s *Store) SetClerkOrgID(ctx context.Context, tenantID, clerkOrgID string) error {
+	if tenantID == "" {
+		return errors.New("identity: empty tenant_id")
+	}
+	if clerkOrgID == "" {
+		return errors.New("identity: empty clerk_org_id")
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE tenants SET clerk_org_id=? WHERE id=?`,
+		clerkOrgID, tenantID,
+	)
+	if err != nil {
+		return fmt.Errorf("identity: set clerk_org_id: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("identity: set clerk_org_id rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// LookupByClerkOrgID resolves a Clerk Organisation id to its bound tenant.
+// Returns ErrNotFound if no tenant has been onboarded with this org id.
+// Called by the auth middleware on the Clerk JWT path after signature
+// verification succeeds.
+func (s *Store) LookupByClerkOrgID(ctx context.Context, clerkOrgID string) (*Tenant, error) {
+	if clerkOrgID == "" {
+		return nil, errors.New("identity: empty clerk_org_id")
+	}
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id,name,created_at,
+		        COALESCE(stripe_customer_id,''),
+		        COALESCE(clerk_org_id,'')
+		   FROM tenants WHERE clerk_org_id=?`, clerkOrgID)
+	var t Tenant
+	if err := row.Scan(&t.ID, &t.Name, &t.CreatedAt, &t.StripeCustomerID, &t.ClerkOrgID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("identity: lookup tenant by clerk_org_id: %w", err)
+	}
+	return &t, nil
+}
+
+// SetClerkUserID associates a Clerk subject id (user_...) with a user row.
+// The (tenantID, userID) pair must already exist; the call is idempotent
+// on the same value and overwrites otherwise. Dashboard sign-in (WS-15)
+// invokes this on first login.
+func (s *Store) SetClerkUserID(ctx context.Context, tenantID, userID, clerkUserID string) error {
+	if tenantID == "" {
+		return errors.New("identity: empty tenant_id")
+	}
+	if userID == "" {
+		return errors.New("identity: empty user_id")
+	}
+	if clerkUserID == "" {
+		return errors.New("identity: empty clerk_user_id")
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE users SET clerk_user_id=? WHERE tenant_id=? AND id=?`,
+		clerkUserID, tenantID, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("identity: set clerk_user_id: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("identity: set clerk_user_id rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// LookupUserByClerkUserID resolves a Clerk subject id back to the user
+// row it was bound to via [Store.SetClerkUserID]. Returns ErrNotFound when
+// the Clerk subject has never been linked. The auth middleware calls this
+// on the JWT path to populate identity.WithUser on the request context.
+func (s *Store) LookupUserByClerkUserID(ctx context.Context, clerkUserID string) (*User, error) {
+	if clerkUserID == "" {
+		return nil, errors.New("identity: empty clerk_user_id")
+	}
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id,tenant_id,email,created_at,COALESCE(clerk_user_id,'')
+		   FROM users WHERE clerk_user_id=?`, clerkUserID)
+	var u User
+	if err := row.Scan(&u.ID, &u.TenantID, &u.Email, &u.CreatedAt, &u.ClerkUserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("identity: lookup user by clerk_user_id: %w", err)
+	}
+	return &u, nil
+}
+
 // CreateUser adds a user under a tenant.
 func (s *Store) CreateUser(ctx context.Context, tenantID, email string) (*User, error) {
 	if tenantID == "" {
@@ -347,10 +480,11 @@ func (s *Store) GetUser(ctx context.Context, tenantID, id string) (*User, error)
 		return nil, errors.New("identity: empty tenant_id")
 	}
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id,tenant_id,email,created_at FROM users WHERE tenant_id=? AND id=?`,
+		`SELECT id,tenant_id,email,created_at,COALESCE(clerk_user_id,'')
+		   FROM users WHERE tenant_id=? AND id=?`,
 		tenantID, id)
 	var u User
-	if err := row.Scan(&u.ID, &u.TenantID, &u.Email, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.TenantID, &u.Email, &u.CreatedAt, &u.ClerkUserID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -454,7 +588,8 @@ func (s *Store) ListUsers(ctx context.Context, tenantID string) ([]*User, error)
 		return nil, errors.New("identity: empty tenant_id")
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,tenant_id,email,created_at FROM users WHERE tenant_id=? ORDER BY created_at`, tenantID)
+		`SELECT id,tenant_id,email,created_at,COALESCE(clerk_user_id,'')
+		   FROM users WHERE tenant_id=? ORDER BY created_at`, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("identity: list users: %w", err)
 	}
@@ -462,7 +597,7 @@ func (s *Store) ListUsers(ctx context.Context, tenantID string) ([]*User, error)
 	var out []*User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.TenantID, &u.Email, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.TenantID, &u.Email, &u.CreatedAt, &u.ClerkUserID); err != nil {
 			return nil, err
 		}
 		out = append(out, &u)
