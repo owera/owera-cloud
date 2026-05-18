@@ -19,7 +19,7 @@
 # fly at the toml in infra/. fly.toml's dockerfile reference resolves
 # back to api/Dockerfile via its `../api/Dockerfile` relative path.
 
-ARG GO_VERSION=1.23
+ARG GO_VERSION=1.24
 ARG ALPINE_VERSION=3.20
 
 FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
