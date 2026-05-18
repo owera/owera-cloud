@@ -494,9 +494,9 @@ func (logAlerter) Alert(_ context.Context, kind string, payload map[string]any) 
 // straightforward) so any test driving the reconciler can substitute
 // a fake billing.Alerter without touching this type.
 type multiAlerter struct {
-	log    billing.Alerter   // always invoked; the stderr JSONL audit
-	router *alerting.Router  // optional; nil = log-only mode
-	source string            // alerting.Alert.Source for remote backends
+	log    billing.Alerter  // always invoked; the stderr JSONL audit
+	router *alerting.Router // optional; nil = log-only mode
+	source string           // alerting.Alert.Source for remote backends
 }
 
 // Alert satisfies billing.Alerter. The local logAlerter always fires
