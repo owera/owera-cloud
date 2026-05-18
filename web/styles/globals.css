@@ -29,6 +29,15 @@
   --color-state-failed:    #ef4444; /* red-500 */
   --color-state-cancelled: #71717a; /* zinc-500 */
 
+  /* Complexity-slider tokens. Single-accent, mapped from existing palette. */
+  --color-stop-track: #1a1a20;
+  --color-stop-fill: #5b8def;
+  --color-stop-thumb: #e6e6e8;
+  --color-stop-tick: #3a3a44;
+  --color-stop-tick-active: #5b8def;
+  --color-stop-label-muted: #6a6a73;
+  --color-stop-label-active: #e6e6e8;
+
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
 }
@@ -65,4 +74,87 @@
     color: inherit;
     text-decoration: none;
   }
+}
+
+/* Docs prose. Restrained, table-flavored, monospace-aware. */
+.prose-owera {
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  line-height: 1.6;
+}
+.prose-owera h1 {
+  font-size: 2rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  margin: 0 0 0.5rem;
+  color: var(--color-foreground);
+}
+.prose-owera h2 {
+  font-size: 1.25rem;
+  font-weight: 500;
+  margin: 2rem 0 0.5rem;
+  color: var(--color-foreground);
+  padding-top: 1rem;
+  border-top: 1px solid var(--color-border);
+}
+.prose-owera h3 {
+  font-size: 1rem;
+  font-weight: 500;
+  margin: 1.5rem 0 0.25rem;
+  color: var(--color-foreground);
+}
+.prose-owera p {
+  font-size: 0.95rem;
+  margin: 0.6rem 0;
+  color: var(--color-foreground);
+}
+.prose-owera .lede {
+  font-size: 1.05rem;
+  color: var(--color-muted-foreground);
+  margin: 0.25rem 0 1.5rem;
+}
+.prose-owera ul,
+.prose-owera ol {
+  margin: 0.6rem 0 0.6rem 1.25rem;
+  font-size: 0.95rem;
+}
+.prose-owera li {
+  margin: 0.25rem 0;
+}
+.prose-owera code:not(pre code) {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  padding: 0.1em 0.35em;
+  background: var(--color-muted);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+}
+.prose-owera a:not(.not-prose a):not([data-no-prose]) {
+  color: var(--color-primary);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--color-primary) 40%, transparent);
+}
+.prose-owera a:not(.not-prose a):hover {
+  text-decoration-color: var(--color-primary);
+}
+.prose-owera table {
+  width: 100%;
+  font-size: 0.85rem;
+  border-collapse: collapse;
+  margin: 1rem 0;
+}
+.prose-owera th,
+.prose-owera td {
+  border: 1px solid var(--color-border);
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+.prose-owera th {
+  background: var(--color-muted);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-muted-foreground);
+  font-weight: 500;
 }

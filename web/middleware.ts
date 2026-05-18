@@ -42,6 +42,16 @@ function isPublicPath(pathname: string): boolean {
 type MiddlewareFn = (req: NextRequest) => Promise<Response> | Response;
 
 function buildMiddleware(): MiddlewareFn {
+  // Mock-auth mode (dev without Clerk keys) must bypass the Clerk middleware
+  // entirely — otherwise Clerk throws on missing publishableKey before the
+  // mock provider in lib/auth.ts ever runs. The fallback comment in this
+  // file always promised this; now it actually does it.
+  if (process.env.NEXT_PUBLIC_AUTH_PROVIDER === "mock") {
+    return (_req: NextRequest) => NextResponse.next();
+  }
+  if (!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY) {
+    return (_req: NextRequest) => NextResponse.next();
+  }
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const clerk = require("@clerk/nextjs/server");

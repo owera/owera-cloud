@@ -10,10 +10,12 @@ interface NavItem {
 
 const NAV: ReadonlyArray<NavItem> = [
   { href: "/dashboard", label: "OVERVIEW", hint: "Usage & recent jobs" },
+  { href: "/compose", label: "COMPOSE", hint: "Slider front door" },
   { href: "/jobs", label: "JOBS", hint: "Submit & track" },
   { href: "/usage", label: "USAGE", hint: "Current period meter" },
   { href: "/billing", label: "BILLING", hint: "Stripe portal" },
   { href: "/api-keys", label: "API KEYS", hint: "Manage secrets" },
+  { href: "/docs", label: "DOCS", hint: "Guides & API ref" },
   { href: "/support", label: "SUPPORT", hint: "Tickets & docs" },
 ];
 
