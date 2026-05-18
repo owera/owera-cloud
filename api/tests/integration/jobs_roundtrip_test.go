@@ -274,7 +274,23 @@ func TestRoundTrip_SKUsListed(t *testing.T) {
 	if err := json.Unmarshal(body, &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(out.SKUs) != 2 {
-		t.Fatalf("skus: got %d want 2; body=%s", len(out.SKUs), body)
+	// V0 launched with 2 SKUs (triage-watch, campaign-swarm). The catalog
+	// grows over time (V1 adds research-brief + code-audit; later tiers
+	// add more). Assert the V0 anchor names are present rather than the
+	// exact count so this integration test doesn't break every time a
+	// new SKU registers.
+	got := map[string]bool{}
+	for _, s := range out.SKUs {
+		if name, _ := s["name"].(string); name != "" {
+			got[name] = true
+		}
+	}
+	for _, want := range []string{"triage-watch", "campaign-swarm"} {
+		if !got[want] {
+			t.Fatalf("skus missing %q; got %v; body=%s", want, got, body)
+		}
+	}
+	if len(out.SKUs) < 2 {
+		t.Fatalf("skus: got %d want >=2; body=%s", len(out.SKUs), body)
 	}
 }
