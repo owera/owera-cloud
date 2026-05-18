@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/owera/owera-cloud/api/internal/alerting"
 	"github.com/owera/owera-cloud/api/internal/audit"
 	"github.com/owera/owera-cloud/api/internal/auth"
 	"github.com/owera/owera-cloud/api/internal/billing"
@@ -71,6 +72,8 @@ type wiring struct {
 	defaultCap    int64  // monthly cost cap when tenant has no override
 	auditStreamer audit.WORMStreamer
 	auditLabel    string // "s3 (<bucket>@<region>, <retention>d)" | "sqlite-only"
+	alertRouter   *alerting.Router
+	alertLabel    string // "log-only" | "log+pagerduty"
 }
 
 // chooseWiring resolves env-driven production vs dev backends. idStore
@@ -105,6 +108,14 @@ type wiring struct {
 //	OWERA_AUDIT_S3_RETENTION_DAYS  int, default 2555 (7y per SOC2/HIPAA)
 //	AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (or IMDS / SSO chain)
 //	                         supply the SigV4 credentials
+//	PAGERDUTY_INTEGRATION_KEY  enables PagerDuty Events API v2 as a
+//	                         parallel alert channel behind the always-on
+//	                         logAlerter. When set, the drift reconciler's
+//	                         multi-alerter fans out CRITICAL alerts to
+//	                         both stderr JSONL (audit stream) and
+//	                         PagerDuty. PagerDuty outages never silence
+//	                         the local emission. See
+//	                         compliance/runbooks/pagerduty-setup.md §5.
 func chooseWiring(idStore *identity.Store) (wiring, error) {
 	w := wiring{
 		billing:      &billing.FakeBackend{},
@@ -116,6 +127,7 @@ func chooseWiring(idStore *identity.Store) (wiring, error) {
 		clerkLabel:   "disabled",
 		defaultCap:   defaultCapCentsFromEnv(),
 		auditLabel:   "sqlite-only",
+		alertLabel:   "log-only",
 	}
 
 	if os.Getenv("STRIPE_SECRET_KEY") != "" {
@@ -173,6 +185,17 @@ func chooseWiring(idStore *identity.Store) (wiring, error) {
 			RetentionDays: retention,
 		}
 		w.auditLabel = fmt.Sprintf("s3 (%s@%s, %dd)", bucket, region, retention)
+	}
+
+	if key := os.Getenv("PAGERDUTY_INTEGRATION_KEY"); key != "" {
+		pd, err := alerting.NewPagerDuty(key)
+		if err != nil {
+			return wiring{}, fmt.Errorf("alerting: %w", err)
+		}
+		r := alerting.NewRouter()
+		r.AddBackend(pd)
+		w.alertRouter = r
+		w.alertLabel = "log+pagerduty"
 	}
 
 	return w, nil
@@ -240,8 +263,8 @@ func run(addr, dbPath string) error {
 		return err
 	}
 
-	log.Printf("apiserver: billing=%s, ledger=%s, rpc=%s, auth=%s, audit=%s, default_cap_cents=%d",
-		w.billingLabel, w.ledgerLabel, w.rpcLabel, w.clerkLabel, w.auditLabel, w.defaultCap)
+	log.Printf("apiserver: billing=%s, ledger=%s, rpc=%s, auth=%s, audit=%s, alerting=%s, default_cap_cents=%d",
+		w.billingLabel, w.ledgerLabel, w.rpcLabel, w.clerkLabel, w.auditLabel, w.alertLabel, w.defaultCap)
 
 	billingSvc, err := billing.New(idStore.DB(), w.billing)
 	if err != nil {
@@ -310,7 +333,12 @@ func run(addr, dbPath string) error {
 	// Stripe would always read drift=0 and add no signal.
 	reconcilerOn := w.billingLabel == "stripe" && w.ledgerLabel != "synthetic" && w.stripeBackend != nil
 	if reconcilerOn {
-		rec, err := billing.NewReconciler(billingSvc, w.stripeBackend, &logAlerter{})
+		ma := &multiAlerter{
+			log:    logAlerter{},
+			router: w.alertRouter, // nil unless PAGERDUTY_INTEGRATION_KEY is set
+			source: "owera-agentic-api",
+		}
+		rec, err := billing.NewReconciler(billingSvc, w.stripeBackend, ma)
 		if err != nil {
 			return err
 		}
@@ -454,4 +482,64 @@ func (logAlerter) Alert(_ context.Context, kind string, payload map[string]any) 
 	}
 	fmt.Fprintln(os.Stderr, string(buf))
 	return nil
+}
+
+// multiAlerter is the billing.Alerter the apiserver hands to the daily
+// drift reconciler. It always fires the local logAlerter first (so a
+// PagerDuty outage never silences the stderr audit emission), then
+// optionally fans out to an internal/alerting Router for remote
+// channels (PagerDuty today; Slack + OpsGenie in the future).
+//
+// The fields are intentionally exported in shape (lowercase but
+// straightforward) so any test driving the reconciler can substitute
+// a fake billing.Alerter without touching this type.
+type multiAlerter struct {
+	log    billing.Alerter   // always invoked; the stderr JSONL audit
+	router *alerting.Router  // optional; nil = log-only mode
+	source string            // alerting.Alert.Source for remote backends
+}
+
+// Alert satisfies billing.Alerter. The local logAlerter always fires
+// first; its error is preserved as the primary return when both legs
+// error so the audit-stream failure (rarer) dominates over the remote-
+// network failure (more common).
+func (m *multiAlerter) Alert(ctx context.Context, kind string, payload map[string]any) error {
+	logErr := m.log.Alert(ctx, kind, payload)
+	if m.router == nil {
+		return logErr
+	}
+	if err := m.router.Fire(ctx, alertingFromBilling(kind, payload, m.source)); err != nil && logErr == nil {
+		return err
+	}
+	return logErr
+}
+
+// alertingFromBilling maps the billing.Alerter (kind, payload) shape to
+// the internal/alerting Alert shape. Every drift alert from the
+// reconciler is Critical for V0 — we never want a drift signal to
+// land somewhere other than the pager. tenant_id (when present in the
+// payload) anchors the dedup key so repeat drift on the same tenant
+// collapses into one open incident.
+func alertingFromBilling(kind string, payload map[string]any, source string) alerting.Alert {
+	labels := make(map[string]string, len(payload))
+	for k, v := range payload {
+		labels[k] = fmt.Sprintf("%v", v)
+	}
+	dedup := kind
+	if t, ok := payload["tenant_id"].(string); ok && t != "" {
+		dedup = kind + ":" + t
+	}
+	body := ""
+	if d, ok := payload["drift_frac"]; ok {
+		body = fmt.Sprintf("drift_frac=%v exceeded reconciler threshold", d)
+	}
+	return alerting.Alert{
+		Severity:   alerting.SeverityCritical,
+		Title:      kind,
+		Body:       body,
+		Source:     source,
+		Dedup:      dedup,
+		Labels:     labels,
+		OccurredAt: time.Now().UTC(),
+	}
 }
