@@ -33,6 +33,7 @@ import (
 
 	"github.com/owera/owera-cloud/api/internal/alerting"
 	"github.com/owera/owera-cloud/api/internal/audit"
+	"github.com/owera/owera-cloud/api/internal/audit/tamperdetect"
 	"github.com/owera/owera-cloud/api/internal/auth"
 	"github.com/owera/owera-cloud/api/internal/billing"
 	"github.com/owera/owera-cloud/api/internal/catalog"
@@ -72,6 +73,9 @@ type wiring struct {
 	defaultCap    int64  // monthly cost cap when tenant has no override
 	auditStreamer audit.WORMStreamer
 	auditLabel    string // "s3 (<bucket>@<region>, <retention>d)" | "sqlite-only"
+	auditS3Reader *tamperdetect.S3EntryReader
+	tamperFlag    time.Duration // 0 disables; default 24h. Set via AUDIT_TAMPER_DETECT_INTERVAL.
+	tamperLabel   string        // "on (24h, full)" | "on (24h, continuity-only)" | "off"
 	alertRouter   *alerting.Router
 	alertLabel    string // "log-only" | "log+pagerduty"
 }
@@ -116,6 +120,18 @@ type wiring struct {
 //	                         PagerDuty. PagerDuty outages never silence
 //	                         the local emission. See
 //	                         compliance/runbooks/pagerduty-setup.md §5.
+//	AUDIT_TAMPER_DETECT_INTERVAL  Go duration (e.g. "24h", "1h"); empty
+//	                         defaults to 24h, "0" disables the cron
+//	                         entirely. When enabled, the apiserver runs
+//	                         a daily tamper-detection pass that checks
+//	                         completeness (every SQLite audit row has a
+//	                         matching S3 WORM object), integrity
+//	                         (sha256(object) == row.hash), and
+//	                         continuity (no rowid gaps). Findings fan
+//	                         out as CRITICAL alerts through the same
+//	                         multiAlerter the drift reconciler uses. If
+//	                         OWERA_AUDIT_S3_BUCKET is unset, the cron
+//	                         runs in continuity-only mode.
 func chooseWiring(idStore *identity.Store) (wiring, error) {
 	w := wiring{
 		billing:      &billing.FakeBackend{},
@@ -127,6 +143,8 @@ func chooseWiring(idStore *identity.Store) (wiring, error) {
 		clerkLabel:   "disabled",
 		defaultCap:   defaultCapCentsFromEnv(),
 		auditLabel:   "sqlite-only",
+		tamperFlag:   tamperIntervalFromEnv(),
+		tamperLabel:  "off",
 		alertLabel:   "log-only",
 	}
 
@@ -185,6 +203,24 @@ func chooseWiring(idStore *identity.Store) (wiring, error) {
 			RetentionDays: retention,
 		}
 		w.auditLabel = fmt.Sprintf("s3 (%s@%s, %dd)", bucket, region, retention)
+		// The same SigV4-signing http.Client doubles as the tamper-
+		// detect reader's transport — connection pooling stays
+		// effective and we don't have to re-resolve AWS creds.
+		w.auditS3Reader = &tamperdetect.S3EntryReader{
+			HTTPClient: httpClient,
+			Endpoint:   endpoint,
+			Bucket:     bucket,
+		}
+	}
+
+	// Compute the tamper-detect label after the S3 block so we know
+	// whether the cron will run in full or continuity-only mode.
+	if w.tamperFlag > 0 {
+		mode := "continuity-only"
+		if w.auditS3Reader != nil {
+			mode = "full"
+		}
+		w.tamperLabel = fmt.Sprintf("on (%s, %s)", w.tamperFlag, mode)
 	}
 
 	if key := os.Getenv("PAGERDUTY_INTEGRATION_KEY"); key != "" {
@@ -199,6 +235,27 @@ func chooseWiring(idStore *identity.Store) (wiring, error) {
 	}
 
 	return w, nil
+}
+
+// tamperIntervalFromEnv parses AUDIT_TAMPER_DETECT_INTERVAL as a Go
+// duration. Empty defaults to 24h; "0" (or any non-positive value)
+// disables the cron entirely. Invalid input also defaults to 24h with
+// a warning so a typo doesn't silently disable G4.
+func tamperIntervalFromEnv() time.Duration {
+	const fallback = 24 * time.Hour
+	v := os.Getenv("AUDIT_TAMPER_DETECT_INTERVAL")
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		log.Printf("apiserver: bad AUDIT_TAMPER_DETECT_INTERVAL=%q, defaulting to %s", v, fallback)
+		return fallback
+	}
+	if d <= 0 {
+		return 0
+	}
+	return d
 }
 
 // auditRetentionDaysFromEnv parses OWERA_AUDIT_S3_RETENTION_DAYS. Unset
@@ -263,8 +320,8 @@ func run(addr, dbPath string) error {
 		return err
 	}
 
-	log.Printf("apiserver: billing=%s, ledger=%s, rpc=%s, auth=%s, audit=%s, alerting=%s, default_cap_cents=%d",
-		w.billingLabel, w.ledgerLabel, w.rpcLabel, w.clerkLabel, w.auditLabel, w.alertLabel, w.defaultCap)
+	log.Printf("apiserver: billing=%s, ledger=%s, rpc=%s, auth=%s, audit=%s, tamper_detect=%s, alerting=%s, default_cap_cents=%d",
+		w.billingLabel, w.ledgerLabel, w.rpcLabel, w.clerkLabel, w.auditLabel, w.tamperLabel, w.alertLabel, w.defaultCap)
 
 	billingSvc, err := billing.New(idStore.DB(), w.billing)
 	if err != nil {
@@ -346,6 +403,37 @@ func run(addr, dbPath string) error {
 		log.Printf("apiserver: reconciler=on (drift detector, daily)")
 	} else {
 		log.Printf("apiserver: reconciler=off (requires billing=stripe + ledger!=synthetic)")
+	}
+
+	// Daily WORM audit tamper detector (launch gate G4). Runs whether
+	// or not S3 is wired — without a reader it checks continuity only.
+	// AUDIT_TAMPER_DETECT_INTERVAL=0 disables; default 24h matches the
+	// drift reconciler cadence so the two cron lines stay visually
+	// aligned in the operator's stderr stream.
+	if w.tamperFlag > 0 {
+		ma := &multiAlerter{
+			log:    logAlerter{},
+			router: w.alertRouter,
+			source: "owera-agentic-api",
+		}
+		// Note: tamperdetect's keyFn matches audit.WormKey by
+		// construction (same format string); we wire through
+		// audit.WormKey explicitly so a future change to the WORM
+		// layout in one place doesn't silently drift the other.
+		var reader tamperdetect.EntryReader
+		if w.auditS3Reader != nil {
+			reader = w.auditS3Reader
+		}
+		td, err := tamperdetect.New(idStore.DB(), reader, ma, w.tamperFlag,
+			tamperdetect.WithKeyFunc(audit.WormKey),
+			tamperdetect.WithSource("owera-agentic-api"))
+		if err != nil {
+			return err
+		}
+		go td.Run(workerCtx)
+		log.Printf("apiserver: tamper_detect=%s", w.tamperLabel)
+	} else {
+		log.Printf("apiserver: tamper_detect=off (AUDIT_TAMPER_DETECT_INTERVAL=0)")
 	}
 
 	h := server.New(deps)

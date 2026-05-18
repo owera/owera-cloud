@@ -103,6 +103,15 @@ func (s *MockWORMStreamer) Keys() []string {
 // KeyFor exposes the deterministic key for a given entry.
 func (s *MockWORMStreamer) KeyFor(e Entry) string { return wormKey(e) }
 
+// WormKey returns the deterministic WORM object key for an entry's
+// (tenant_id, ts, hash) triple. Exported so the tamper-detect
+// reconciler can recompute the same key when verifying objects against
+// SQLite rows without importing the package-local helper.
+func WormKey(tenantID string, ts time.Time, hash string) string {
+	day := ts.UTC().Format("2006-01-02")
+	return fmt.Sprintf("audit/%s/%s/%s.json", tenantID, day, hash)
+}
+
 func wormKey(e Entry) string {
 	// Layout chosen so S3 lifecycle queries by tenant/day are cheap:
 	//   audit/<tenant_id>/<YYYY-MM-DD>/<hash>.json
