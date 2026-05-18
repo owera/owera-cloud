@@ -69,6 +69,8 @@ type wiring struct {
 	clerk         auth.ClerkAuthenticator
 	clerkLabel    string // "clerk (<issuer>)" | "disabled"
 	defaultCap    int64  // monthly cost cap when tenant has no override
+	auditStreamer audit.WORMStreamer
+	auditLabel    string // "s3 (<bucket>@<region>, <retention>d)" | "sqlite-only"
 }
 
 // chooseWiring resolves env-driven production vs dev backends. idStore
@@ -88,6 +90,21 @@ type wiring struct {
 //	OWERA_DEFAULT_CAP_CENTS  monthly cost-cap default (cents) for
 //	                         tenants that haven't set their own;
 //	                         defaults to 20000 ($200/mo)
+//	OWERA_AUDIT_S3_BUCKET    enables WORM audit shipping to S3 with
+//	                         Object Lock (Governance mode). When set,
+//	                         each audit_log row is PUT to
+//	                         s3://<bucket>/audit/<tenant>/<YYYY-MM-DD>/<hash>.json
+//	                         with x-amz-object-lock-mode=GOVERNANCE and
+//	                         a retain-until-date of now+RetentionDays.
+//	                         Unset → SQLite-only (the WORM triggers
+//	                         still enforce append-only at the DB).
+//	OWERA_AUDIT_S3_REGION    default "us-east-1"
+//	OWERA_AUDIT_S3_ENDPOINT  default "https://s3.<region>.amazonaws.com";
+//	                         override for MinIO or other S3-compatible
+//	                         stores
+//	OWERA_AUDIT_S3_RETENTION_DAYS  int, default 2555 (7y per SOC2/HIPAA)
+//	AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (or IMDS / SSO chain)
+//	                         supply the SigV4 credentials
 func chooseWiring(idStore *identity.Store) (wiring, error) {
 	w := wiring{
 		billing:      &billing.FakeBackend{},
@@ -98,6 +115,7 @@ func chooseWiring(idStore *identity.Store) (wiring, error) {
 		rpcLabel:     "in-memory",
 		clerkLabel:   "disabled",
 		defaultCap:   defaultCapCentsFromEnv(),
+		auditLabel:   "sqlite-only",
 	}
 
 	if os.Getenv("STRIPE_SECRET_KEY") != "" {
@@ -133,7 +151,49 @@ func chooseWiring(idStore *identity.Store) (wiring, error) {
 		w.clerkLabel = "clerk (" + iss + ")"
 	}
 
+	if bucket := os.Getenv("OWERA_AUDIT_S3_BUCKET"); bucket != "" {
+		region := os.Getenv("OWERA_AUDIT_S3_REGION")
+		if region == "" {
+			region = "us-east-1"
+		}
+		endpoint := os.Getenv("OWERA_AUDIT_S3_ENDPOINT")
+		if endpoint == "" {
+			endpoint = "https://s3." + region + ".amazonaws.com"
+		}
+		retention := auditRetentionDaysFromEnv()
+		httpClient, err := audit.NewSigV4HTTPClient(context.Background(), region, "s3")
+		if err != nil {
+			return wiring{}, fmt.Errorf("audit s3: %w", err)
+		}
+		w.auditStreamer = &audit.S3WORMStreamer{
+			HTTPClient:    httpClient,
+			Endpoint:      endpoint,
+			Bucket:        bucket,
+			Region:        region,
+			RetentionDays: retention,
+		}
+		w.auditLabel = fmt.Sprintf("s3 (%s@%s, %dd)", bucket, region, retention)
+	}
+
 	return w, nil
+}
+
+// auditRetentionDaysFromEnv parses OWERA_AUDIT_S3_RETENTION_DAYS. Unset
+// or invalid input returns 2555 (7 y) per common SOC2/HIPAA defaults.
+// Compliance reduction below 365 d should be a deliberate decision and
+// is rejected at the env layer.
+func auditRetentionDaysFromEnv() int {
+	const fallback = 2555
+	v := os.Getenv("OWERA_AUDIT_S3_RETENTION_DAYS")
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 365 {
+		log.Printf("apiserver: bad OWERA_AUDIT_S3_RETENTION_DAYS=%q (need int >= 365), defaulting to %d", v, fallback)
+		return fallback
+	}
+	return n
 }
 
 // defaultCapCentsFromEnv parses OWERA_DEFAULT_CAP_CENTS. Unset or bad
@@ -166,17 +226,22 @@ func run(addr, dbPath string) error {
 	if err != nil {
 		return err
 	}
-	auditLog, err := audit.New(idStore.DB())
-	if err != nil {
-		return err
-	}
-
 	w, err := chooseWiring(idStore)
 	if err != nil {
 		return err
 	}
-	log.Printf("apiserver: billing=%s, ledger=%s, rpc=%s, auth=%s, default_cap_cents=%d",
-		w.billingLabel, w.ledgerLabel, w.rpcLabel, w.clerkLabel, w.defaultCap)
+
+	var auditOpts []audit.Option
+	if w.auditStreamer != nil {
+		auditOpts = append(auditOpts, audit.WithStreamer(w.auditStreamer))
+	}
+	auditLog, err := audit.New(idStore.DB(), auditOpts...)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("apiserver: billing=%s, ledger=%s, rpc=%s, auth=%s, audit=%s, default_cap_cents=%d",
+		w.billingLabel, w.ledgerLabel, w.rpcLabel, w.clerkLabel, w.auditLabel, w.defaultCap)
 
 	billingSvc, err := billing.New(idStore.DB(), w.billing)
 	if err != nil {
