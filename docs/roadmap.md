@@ -2,7 +2,7 @@
 
 > **Audience: internal team + select prospects under NDA.** This is the planned ramp; it changes with demand and engineering signal. Source of truth for delivered state is the git log on `main` + the GA gates (`compliance/policies/ga-gate.md`). For the master plan (waves, workstreams, ticket backlog), see [`knowing-all-you-now-calm-leaf.md`](https://github.com/owera/owera-fleet/blob/main/knowing-all-you-now-calm-leaf.md) in the operator-plane repo.
 
-Last updated: 2026-05-17 (evening — Wave 9-A close-out).
+Last updated: 2026-05-17 (late evening — Wave 10 Track A + V0 Stripe demo + public flip).
 
 ## What we're working on right now
 
@@ -10,13 +10,13 @@ The single most important question this doc has to answer. Updated whenever the 
 
 | Thread | State | Owner | Blocker |
 |---|---|---|---|
-| **Stripe billing now emits in production** — outbox flusher (60 s ticker) + daily drift detector both live; boot log shows `reconciler=on (drift detector, daily)` | ✅ Deployed (PR #37) | — | None |
-| **V0 end-to-end smoke** — onboard a test tenant via `/v1/admin/*`, mint an `owc_*` API key, submit a `triage-watch` job, see it traverse cloud → tunnel → operator → ledger → Stripe usage record | 🚧 In flight | Rodrigo (operator) | `OWERA_ADMIN_TOKEN` access (Fly stores digest-only; rotate or look up locally) |
-| **Customer-facing docs aligned with live admin endpoints** — onboarding.md + support.md + new support-sla.md runbook | ✅ Shipped (PR #36) | — | None |
-| **CodeQL workflow staged** for repo-public flip (Go + JS scanners) | ✅ Shipped (PR #35) with private-repo guard; activates automatically when repo flips public | — | Repo visibility flip is an operator action |
+| **V0 end-to-end paid job demoed live in production** — `campaign-swarm@v1` traversed cloud → tunnel → operator → ledger → reconciler → real Stripe InvoiceItem on `cus_UXImEhwCti1Aq6` (test mode) | ✅ Demo'd 2026-05-18 ~00:03 UTC | — | None |
+| **Repo flipped public** + free unlimited Actions + GHAS + CodeQL live | ✅ 2026-05-18 ~00:50 UTC | — | None |
+| **Wave 10 Track A hardening sprint** — long-running SKURouter, campaign-swarm tier selection, reconciler dead-letter, V1 SKU stubs (research-brief + code-audit), SOC 2 evidence map | ✅ All 7 PRs merged (cloud #43-#46, fleet #25-#27, plus #28 CodeQL) | — | None |
+| **Track B (real triage-watch + campaign-swarm)** | ⏳ Specs ready (`owera-fleet/docs/sku-execution-spec.md`) | Engineering on-demand once external creds land | Zendesk / Twitter / LinkedIn / SendGrid dev accounts (operator action) |
 | **Operator-plane work** (sibling repo) | ⏩ See [`owera-fleet` roadmap](https://github.com/owera/owera-fleet/blob/main/docs/roadmap.md) | — | — |
 
-> **TL;DR for "where are we at?":** All Phase-3 engineering shipped, including the production billing-emission reconciler. The platform is end-to-end live. One operator-action sequence (admin-token, then first job submission) demonstrates the V0 SKU; one more (repo-public flip + staging Mac procurement) opens Phase-4 launch readiness.
+> **TL;DR for "where are we at?":** Phases 1, 2, 2.5, 3 + the Track A hardening sprint are all engineering-complete. The platform demoed end-to-end last night: a real Stripe InvoiceItem fired against a real Stripe customer for a real V0 SKU job submission. **Every remaining item is operator-action-bound** — `claw-staging.local` hardware, Stripe live mode, PagerDuty, BR tax/legal, design partner #1.
 
 ## Status at a glance
 
@@ -29,9 +29,13 @@ The single most important question this doc has to answer. Updated whenever the 
 | 8.2 | Production wire-up: API Dockerfile + Fly deploy, Clerk JWT + admin endpoints, `/readyz` operator-plane RPC, admin API-key mint, onboarding playbook v2; on fleet side: `fleet.LedgerTail` RPC + snapshot publisher + launchd installer | Shipped |
 | 9-A + B1 | Phase-1 verification gate + Phase-2 e2e coverage + reconciler wire-up: 11 PRs (cloud #35 CodeQL, #36 customer docs+SLA, #37 reconciler, #38 lint cleanup; fleet #14 audit-config, #15 swarm e2e, #16 cronjob+alert e2e, #17 markers CLI, #18 drift cleanup, #19 bootstrap phases 1-9, #20 state parity) | Shipped |
 | 9-C | Live verification gauntlet + hermes-setup cutover | Engineering ready; gated on `claw-staging.local` Mac procurement (operator) |
-| 10 | Phase-4 launch readiness (PagerDuty drill, BR legal/tax, design partner #1) | Planned — Stripe live-mode, repo-public flip, staging Mac, PagerDuty, BR tax accountant, BR SaaS lawyer are the gating operator actions |
-| 11 | Beta → GA decision | Gated on GA policy |
-| 10 | Beta → GA decision | Gated on GA policy |
+| WS-A / WS-A.1 | First-V0-SKU end-to-end execution: stub routers register in `fleet.SubmitJob`; bill-event subscriber bridges operator ledger → cloud outbox; reconciler dead-letter policy + skip-and-continue; tier-letter meter convention; **real Stripe InvoiceItem demoed in production 2026-05-18 ~00:03 UTC** (cloud PRs #37 #40 #41 #42, fleet PR #24) | Shipped |
+| 10-A | Hardening sprint: long-running SKURouter; tier selection; reconciler dead-letter; V1 SKU stubs; SOC 2 evidence map; CodeQL on fleet repo | Shipped — cloud PRs #43-#46, fleet PRs #25-#28 |
+| Public flip | `owera/owera-cloud` + `owera/owera-fleet` flipped to public 2026-05-18; CodeQL + GHAS + unlimited Actions all active | Shipped |
+| 10-B | Real `triage-watch` (WS-B) + real `campaign-swarm` (WS-C) | Specs ready; engineering blocked on external API credentials (Zendesk / Twitter / LinkedIn / SendGrid dev accounts) |
+| 10-C | Operator-action items: claw-staging.local procurement, Stripe live-mode + product cleanup, PagerDuty drill (T19.6), BR tax accountant, BR SaaS lawyer + DPA/SCC, design partner #1 (T20.1) | Planned — every item is operator-action, no engineering blocked |
+| 10-D | Cutover gauntlet (C1 staging bootstrap → C2 e2e gauntlet → C3 hermes-setup archive) | Engineering ready; gated on 10-C `claw-staging.local` |
+| 11 | Beta → GA decision | Gated on GA policy (6 gates in `compliance/policies/ga-gate.md`) |
 | Post-GA | V2–V4 catalogue ramp | Demand-driven |
 
 ## Catalogue ramp
@@ -123,3 +127,4 @@ Anything in V0-V2 is committed to. V3-V4 entries are intent, not promise.
 | 2026-05-17 (PM) | TL (Wave 8.2) | Status table updated: Waves 8 + 8.1 marked Shipped; new Wave 8.2 row covers production wire-up across both repos (cloud PRs #25–#32, fleet PRs #7–#11). Wave 9 gating clarified — Stripe account cleanup, `owera-cloud` repo visibility flip, and `claw-staging.local` provisioning are operator-action blockers, not engineering. See master-plan execution log for the per-PR breakdown. |
 | 2026-05-17 (later PM) | Claude (under Rodrigo) | Added "What we're working on right now" stanza at the top so the answer to "where are we at?" is on the first screen, not buried in a table. Mirrors the equivalent stanza in `owera-fleet/docs/roadmap.md` (created the same evening). |
 | 2026-05-17 (evening) | Claude (under Rodrigo) | Wave 9-A + B1 close-out. 11 PRs merged across both repos (cloud #35 CodeQL, #36 customer docs+SLA, #37 reconciler wire-up + Fly deploy verified, #38 lint cleanup; fleet #14 audit-config, #15/#16/#17 real e2e scenarios, #18 drift cleanup, #19 bootstrap phases 1-9, #20 state parity). Production billing emission live: `apiserver: reconciler=on (drift detector, daily)` in boot log. Wave 9 row renamed to "9-A + B1"; added 9-C row for verification gauntlet + cutover (gated on `claw-staging.local`). Now operator-action-bound on every remaining Phase-4 item. |
+| 2026-05-17 (late evening) | Claude (under Rodrigo) | WS-A + WS-A.1 + Track A + V0 Stripe demo + public flip. PRs landed: cloud #40 (WS-A.1 bill subscriber), #41 (reconciler skip-and-continue), #42 (stripe.Key global), #43 (V1 SKU stubs), #44 (H3 dead-letter), #45 (H5 SOC 2 evidence map), #46 (test loosener); fleet #23 (WS-A stub routers), #24 (campaign-swarm tier-letter meter), #25 (H2 tier selection), #26 (H1 long-running SKURouter), #27 (H4 operator stubs), #28 (CodeQL workflow). **Real Stripe InvoiceItem fired 2026-05-18 ~00:03 UTC** on `cus_UXImEhwCti1Aq6` from a live `campaign-swarm@v1` job — Phase-3 verification step 10 demonstrably closed. Both repos flipped public; CodeQL active on both with zero day-one findings on owera-fleet. Engineering-side critical path is fully closed; only operator actions remain. |
