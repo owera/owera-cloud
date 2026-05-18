@@ -20,6 +20,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/owera/owera-cloud/api/internal/audit"
+	"github.com/owera/owera-cloud/api/internal/billing"
 	"github.com/owera/owera-cloud/api/internal/identity"
 )
 
@@ -82,7 +83,29 @@ func registerAdmin(r chi.Router, d Deps) {
 		r.Post("/tenants/{tenantID}/clerk-org", adminSetClerkOrg(d))
 		r.Post("/tenants/{tenantID}/users/{userID}/clerk-user", adminSetClerkUser(d))
 		r.Post("/tenants/{tenantID}/users/{userID}/api-keys", adminIssueAPIKey(d))
+		r.Get("/billing/dead-letters", adminListBillingDeadLetters(d))
 	})
+}
+
+// adminListBillingDeadLetters returns every billing_outbox row that has
+// been dead-lettered (failure_count reached OWERA_DEAD_LETTER_THRESHOLD
+// during Reconcile). Read-only; operators decide whether to delete, fix
+// the underlying StripeRef, or manually re-queue. Returns an empty list
+// (not 503) when the billing service isn't wired, so callers can poll
+// safely against any environment.
+func adminListBillingDeadLetters(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if d.Billing == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"dead_letters": []billing.DeadLetter{}})
+			return
+		}
+		rows, err := d.Billing.ListDeadLetters(r.Context())
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"dead_letters": rows})
+	}
 }
 
 // --- handlers ---

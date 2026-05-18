@@ -424,3 +424,33 @@ func TestAdmin_IssueAPIKey_DefaultLabel(t *testing.T) {
 		t.Errorf("default label want operator-issued, got %q", got.Label)
 	}
 }
+
+// TestAdmin_BillingDeadLetters_NilBilling: with no billing service
+// wired (dev default), the endpoint returns 200 with an empty list
+// rather than 503 — operators can poll regardless of environment.
+func TestAdmin_BillingDeadLetters_NilBilling(t *testing.T) {
+	h := newAdminHarness(t)
+	resp, body := h.do(t, "GET", "/v1/admin/billing/dead-letters", h.token, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200, body=%s", resp.StatusCode, body)
+	}
+	var got struct {
+		DeadLetters []map[string]any `json:"dead_letters"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, body)
+	}
+	if len(got.DeadLetters) != 0 {
+		t.Errorf("dead_letters: got %d, want 0", len(got.DeadLetters))
+	}
+}
+
+// TestAdmin_BillingDeadLetters_NoToken: bearer-auth gating mirrors the
+// rest of the /v1/admin surface.
+func TestAdmin_BillingDeadLetters_NoToken(t *testing.T) {
+	h := newAdminHarness(t)
+	resp, _ := h.do(t, "GET", "/v1/admin/billing/dead-letters", "", nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status: got %d want 401", resp.StatusCode)
+	}
+}

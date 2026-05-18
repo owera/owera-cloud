@@ -39,6 +39,7 @@ func TestRegisteredRoutes(t *testing.T) {
 		"DELETE /v1/tenants/me/data",
 		"GET /healthz",
 		"GET /readyz",
+		"GET /v1/admin/billing/dead-letters",
 		"GET /v1/admin/tenants",
 		"GET /v1/jobs/",
 		"GET /v1/jobs/{id}",

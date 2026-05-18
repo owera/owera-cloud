@@ -19,9 +19,27 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
+
+// DefaultDeadLetterThreshold is the failure_count at which a pending
+// outbox row is permanently dead-lettered. Overridable per-process via
+// the OWERA_DEAD_LETTER_THRESHOLD env var. Picked to be high enough that
+// a transient Stripe blip doesn't dead-letter, low enough that a truly
+// broken row (e.g. catalog: no StripeRef) stops spamming the log within
+// ~10 reconcile ticks.
+const DefaultDeadLetterThreshold = 10
+
+// DeadLetterThresholdEnv is the env var name for runtime override.
+const DeadLetterThresholdEnv = "OWERA_DEAD_LETTER_THRESHOLD"
+
+// maxLastErrorLen caps the persisted last_error column so a backend
+// shouting a 4 KB stack trace at us doesn't bloat the outbox row.
+const maxLastErrorLen = 500
 
 // Backend is the billing-provider substitution point. EmitUsage records a
 // metered usage line for tenantID against a SKU/meter. idemKey is the
@@ -169,17 +187,58 @@ func (s *Service) migrate() error {
 			meter       TEXT NOT NULL,
 			units       INTEGER NOT NULL,
 			ts          DATETIME NOT NULL,
-			billed_at   DATETIME
+			billed_at   DATETIME,
+			failure_count    INTEGER NOT NULL DEFAULT 0,
+			last_error       TEXT,
+			last_attempt_at  TEXT,
+			dead_lettered_at TEXT
 		)`,
+		// Idempotent column adds for DBs that already have the table
+		// from before the dead-letter columns existed. SQLite has no
+		// IF NOT EXISTS on ALTER, so the loop below swallows the
+		// "duplicate column name" error — same pattern as
+		// identity.Store.migrate().
+		`ALTER TABLE billing_outbox ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE billing_outbox ADD COLUMN last_error TEXT`,
+		`ALTER TABLE billing_outbox ADD COLUMN last_attempt_at TEXT`,
+		`ALTER TABLE billing_outbox ADD COLUMN dead_lettered_at TEXT`,
 		`CREATE INDEX IF NOT EXISTS billing_pending_idx ON billing_outbox(billed_at)`,
 		`CREATE INDEX IF NOT EXISTS billing_tenant_period_idx ON billing_outbox(tenant_id, ts)`,
+		// Partial index: the reconcile scan walks
+		// dead_lettered_at IS NULL rows only, so index just those.
+		`CREATE INDEX IF NOT EXISTS billing_outbox_dead_letter_idx
+		   ON billing_outbox(dead_lettered_at) WHERE dead_lettered_at IS NULL`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
+			if strings.Contains(err.Error(), "duplicate column name") {
+				continue
+			}
 			return fmt.Errorf("billing: migrate: %w", err)
 		}
 	}
 	return nil
+}
+
+// deadLetterThreshold returns the active dead-letter threshold,
+// honouring the OWERA_DEAD_LETTER_THRESHOLD env var if set to a positive
+// integer. Read per-call so operators can rotate without a restart.
+func deadLetterThreshold() int {
+	if v := os.Getenv(DeadLetterThresholdEnv); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return DefaultDeadLetterThreshold
+}
+
+// truncate caps s at n runes-wise (close enough — Stripe errors are
+// ASCII in practice). Empty input returns empty.
+func truncateErr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
 
 // Record stores a bill event in the outbox. Events with Result != "bill"
@@ -218,29 +277,43 @@ func (s *Service) Record(ctx context.Context, ev LedgerEvent) error {
 // stable across retries; if Reconcile is interrupted between the EmitUsage
 // success and the billed_at UPDATE, the next pass replays the same key and
 // Stripe returns the original record without double-charging.
+//
+// Failure handling: each dispatch or emit error increments failure_count
+// and records last_error/last_attempt_at on the row, but does NOT touch
+// billed_at — so the row is still considered pending and retries on the
+// next tick (the skip-and-continue invariant from PR #41). Once
+// failure_count reaches OWERA_DEAD_LETTER_THRESHOLD, dead_lettered_at is
+// stamped and the row is permanently skipped by subsequent Reconcile
+// scans (it no longer matches the dead_lettered_at IS NULL filter).
+// Operators can inspect dead-lettered rows via /v1/admin/billing/dead-letters
+// or by querying the outbox directly.
 func (s *Service) Reconcile(ctx context.Context) (int, error) {
 	if s.backend == nil {
 		return 0, errors.New("billing: no backend")
 	}
+	threshold := deadLetterThreshold()
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,entry_id,tenant_id,sku,meter,units,ts
-		 FROM billing_outbox WHERE billed_at IS NULL ORDER BY id`)
+		`SELECT id,entry_id,tenant_id,sku,meter,units,ts,failure_count
+		 FROM billing_outbox
+		 WHERE billed_at IS NULL AND dead_lettered_at IS NULL
+		 ORDER BY id`)
 	if err != nil {
 		return 0, fmt.Errorf("billing: select pending: %w", err)
 	}
 	type pending struct {
-		ID       int64
-		EntryID  string
-		TenantID string
-		SKU      string
-		Meter    string
-		Units    int64
-		Ts       time.Time
+		ID           int64
+		EntryID      string
+		TenantID     string
+		SKU          string
+		Meter        string
+		Units        int64
+		Ts           time.Time
+		FailureCount int
 	}
 	var ps []pending
 	for rows.Next() {
 		var p pending
-		if err := rows.Scan(&p.ID, &p.EntryID, &p.TenantID, &p.SKU, &p.Meter, &p.Units, &p.Ts); err != nil {
+		if err := rows.Scan(&p.ID, &p.EntryID, &p.TenantID, &p.SKU, &p.Meter, &p.Units, &p.Ts, &p.FailureCount); err != nil {
 			_ = rows.Close()
 			return 0, err
 		}
@@ -266,8 +339,10 @@ func (s *Service) Reconcile(ctx context.Context) (int, error) {
 			// name with no StripeRef) must not block the rest of the
 			// queue. The row stays pending (billed_at = NULL) so it
 			// retries on the next tick — operator can fix the
-			// StripeRef or delete the row out-of-band.
+			// StripeRef or delete the row out-of-band. Failure count
+			// gates how many times we'll log this before giving up.
 			log.Printf("billing: dispatch %s: %v (skipping; row remains pending)", p.EntryID, err)
+			s.recordFailure(ctx, p.ID, p.EntryID, p.FailureCount+1, err.Error(), threshold)
 			continue
 		}
 		switch plan.Kind {
@@ -285,6 +360,7 @@ func (s *Service) Reconcile(ctx context.Context) (int, error) {
 			}
 			if err := s.backend.EmitOneShot(ctx, emit); err != nil {
 				log.Printf("billing: emit oneshot %s: %v (skipping; row remains pending)", p.EntryID, err)
+				s.recordFailure(ctx, p.ID, p.EntryID, p.FailureCount+1, err.Error(), threshold)
 				continue
 			}
 		default: // DispatchKindMetered or any unrecognised value
@@ -302,6 +378,7 @@ func (s *Service) Reconcile(ctx context.Context) (int, error) {
 			}
 			if err := s.backend.EmitUsage(ctx, emit); err != nil {
 				log.Printf("billing: emit usage %s: %v (skipping; row remains pending)", p.EntryID, err)
+				s.recordFailure(ctx, p.ID, p.EntryID, p.FailureCount+1, err.Error(), threshold)
 				continue
 			}
 		}
@@ -315,6 +392,84 @@ func (s *Service) Reconcile(ctx context.Context) (int, error) {
 		emitted++
 	}
 	return emitted, nil
+}
+
+// recordFailure persists the new failure_count/last_error/last_attempt_at
+// for a row that just failed dispatch or emit. If nextCount has reached
+// the dead-letter threshold, also stamps dead_lettered_at and logs
+// loudly so the row stops contributing to the per-tick error noise.
+// Note: we deliberately do not auto-recover. A row that succeeds after
+// some failures keeps its failure_count (which is fine — billed_at is
+// set so it never re-enters the scan).
+func (s *Service) recordFailure(ctx context.Context, id int64, entryID string, nextCount int, errMsg string, threshold int) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	truncated := truncateErr(errMsg, maxLastErrorLen)
+	if nextCount >= threshold {
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE billing_outbox
+			 SET failure_count=?, last_error=?, last_attempt_at=?, dead_lettered_at=?
+			 WHERE id=?`,
+			nextCount, truncated, now, now, id,
+		); err != nil {
+			log.Printf("billing: dead-letter update %s: %v", entryID, err)
+			return
+		}
+		log.Printf("billing: dead-lettered entry_id=%s after %d failures: last_error=%q",
+			entryID, nextCount, truncated)
+		return
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE billing_outbox
+		 SET failure_count=?, last_error=?, last_attempt_at=?
+		 WHERE id=?`,
+		nextCount, truncated, now, id,
+	); err != nil {
+		log.Printf("billing: failure-bookkeep update %s: %v", entryID, err)
+	}
+}
+
+// DeadLetter is one row from the billing_outbox where dead_lettered_at
+// is non-null. Operator-facing — surfaced by the admin endpoint.
+type DeadLetter struct {
+	ID             int64     `json:"id"`
+	EntryID        string    `json:"entry_id"`
+	TaskID         string    `json:"task_id"`
+	TenantID       string    `json:"tenant_id"`
+	SKU            string    `json:"sku"`
+	Meter          string    `json:"meter"`
+	Units          int64     `json:"units"`
+	Ts             time.Time `json:"ts"`
+	FailureCount   int       `json:"failure_count"`
+	LastError      string    `json:"last_error"`
+	LastAttemptAt  string    `json:"last_attempt_at"`
+	DeadLetteredAt string    `json:"dead_lettered_at"`
+}
+
+// ListDeadLetters returns every row where dead_lettered_at IS NOT NULL,
+// most-recently-failed first. Read-only; operators use this to triage
+// rows that have exhausted retries.
+func (s *Service) ListDeadLetters(ctx context.Context) ([]DeadLetter, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id,entry_id,task_id,tenant_id,sku,meter,units,ts,
+		        failure_count,COALESCE(last_error,''),
+		        COALESCE(last_attempt_at,''),COALESCE(dead_lettered_at,'')
+		 FROM billing_outbox
+		 WHERE dead_lettered_at IS NOT NULL
+		 ORDER BY dead_lettered_at DESC, id DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("billing: list dead-letters: %w", err)
+	}
+	defer rows.Close()
+	out := []DeadLetter{}
+	for rows.Next() {
+		var d DeadLetter
+		if err := rows.Scan(&d.ID, &d.EntryID, &d.TaskID, &d.TenantID, &d.SKU, &d.Meter,
+			&d.Units, &d.Ts, &d.FailureCount, &d.LastError, &d.LastAttemptAt, &d.DeadLetteredAt); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }
 
 // planFor returns the DispatchPlan for evt. If no dispatcher is wired
