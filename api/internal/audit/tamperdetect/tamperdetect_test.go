@@ -402,3 +402,223 @@ func TestRun_IntervalZeroIsNoOp(t *testing.T) {
 		t.Fatal("Run with interval=0 did not return immediately")
 	}
 }
+
+// concurrencyReader wraps a mockReader and tracks the maximum number
+// of in-flight GetEntry calls seen during a Check pass. The streaming
+// scan never calls GetEntry concurrently (the loop is serial inside
+// scanBatch), so the recorded max should always be 1 — but the test
+// is structured so that if a future refactor accidentally buffers an
+// entire page's worth of GETs in parallel, the assertion would catch
+// it.
+//
+// The stronger guarantee — that no more than batchSize rows are
+// resident in memory at any point — is enforced by construction: the
+// scanBatch function uses LIMIT ? in the SQL, and rows.Next streams
+// row-by-row from SQLite. The test below exercises the multi-page
+// code path with a batch much smaller than the dataset and asserts
+// the outcome is identical to a single-batch run.
+type concurrencyReader struct {
+	mu       sync.Mutex
+	inflight int
+	peak     int
+	inner    *mockReader
+}
+
+func newConcurrencyReader(inner *mockReader) *concurrencyReader {
+	return &concurrencyReader{inner: inner}
+}
+
+func (c *concurrencyReader) GetEntry(ctx context.Context, key string) ([]byte, error) {
+	c.mu.Lock()
+	c.inflight++
+	if c.inflight > c.peak {
+		c.peak = c.inflight
+	}
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.inflight--
+		c.mu.Unlock()
+	}()
+	return c.inner.GetEntry(ctx, key)
+}
+
+// runCheck is a small helper to build a Detector with the given batch
+// size and run one Check pass.
+func runCheck(t *testing.T, db *sql.DB, reader EntryReader, batchSize int) *Report {
+	t.Helper()
+	opts := []Option{}
+	if batchSize > 0 {
+		opts = append(opts, WithBatchSize(batchSize))
+	}
+	d, err := New(db, reader, &recordingAlerter{}, 0, opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rep, err := d.Check(context.Background())
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	return rep
+}
+
+func TestCheck_StreamingBatch_5000Rows(t *testing.T) {
+	db := newTestDB(t)
+	reader := newMockReader()
+
+	ts := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	const total = 5000
+	for i := 0; i < total; i++ {
+		_, hash, body := insertRow(t, db, "fixture-batch", ts, fmt.Sprintf(`{"i":%d}`, i))
+		reader.put(defaultKey("fixture-batch", ts, hash), []byte(body))
+	}
+
+	conc := newConcurrencyReader(reader)
+	rep := runCheck(t, db, conc, 100)
+
+	if !rep.Clean() {
+		t.Fatalf("expected clean, got %+v counters", rep)
+	}
+	if rep.RowsScanned != total {
+		t.Fatalf("RowsScanned: got %d want %d", rep.RowsScanned, total)
+	}
+	if reader.getCalls != total {
+		t.Fatalf("getCalls: got %d want %d (every row should be probed exactly once)", reader.getCalls, total)
+	}
+	// Streaming scan must NOT issue concurrent GETs (the loop is
+	// serial). If peak ever exceeds 1 a future change has pre-
+	// fetched a page's worth of objects in parallel — that's a
+	// behaviour change that has to be opted into deliberately, not
+	// snuck in via a refactor of this loop.
+	if conc.peak > 1 {
+		t.Fatalf("peak inflight GETs: got %d want 1 (streaming scan is serial)", conc.peak)
+	}
+}
+
+func TestCheck_StreamingBatch_MatchesSingleBatch(t *testing.T) {
+	// Same dataset, two passes: tiny batch vs. one-batch-bigger-than-
+	// dataset. Counters and findings should be identical.
+	ts := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	const total = 250 // enough to exercise multi-page when batch=37
+
+	build := func(t *testing.T) (*sql.DB, *mockReader) {
+		t.Helper()
+		db := newTestDB(t)
+		reader := newMockReader()
+		for i := 0; i < total; i++ {
+			payload := fmt.Sprintf(`{"i":%d}`, i)
+			_, hash, body := insertRow(t, db, "fixture-mix", ts, payload)
+			// Stage every other object; the rest are missing
+			// (this fans out into MissingObjects findings).
+			if i%2 == 0 {
+				reader.put(defaultKey("fixture-mix", ts, hash), []byte(body))
+			}
+		}
+		return db, reader
+	}
+
+	dbSmall, readerSmall := build(t)
+	repSmall := runCheck(t, dbSmall, readerSmall, 37)
+
+	dbBig, readerBig := build(t)
+	repBig := runCheck(t, dbBig, readerBig, total+1) // single batch
+
+	if repSmall.RowsScanned != repBig.RowsScanned {
+		t.Fatalf("RowsScanned: small=%d big=%d", repSmall.RowsScanned, repBig.RowsScanned)
+	}
+	if repSmall.MissingObjects != repBig.MissingObjects {
+		t.Fatalf("MissingObjects: small=%d big=%d", repSmall.MissingObjects, repBig.MissingObjects)
+	}
+	if repSmall.HashMismatches != repBig.HashMismatches {
+		t.Fatalf("HashMismatches: small=%d big=%d", repSmall.HashMismatches, repBig.HashMismatches)
+	}
+	if repSmall.RowidGaps != repBig.RowidGaps {
+		t.Fatalf("RowidGaps: small=%d big=%d", repSmall.RowidGaps, repBig.RowidGaps)
+	}
+	if repSmall.ReadErrors != repBig.ReadErrors {
+		t.Fatalf("ReadErrors: small=%d big=%d", repSmall.ReadErrors, repBig.ReadErrors)
+	}
+	if len(repSmall.Findings) != len(repBig.Findings) {
+		t.Fatalf("Findings length: small=%d big=%d", len(repSmall.Findings), len(repBig.Findings))
+	}
+	for i := range repSmall.Findings {
+		if repSmall.Findings[i] != repBig.Findings[i] {
+			t.Fatalf("Findings[%d] diverged: small=%+v big=%+v", i, repSmall.Findings[i], repBig.Findings[i])
+		}
+	}
+}
+
+func TestCheck_StreamingBatch_GapAcrossPageBoundary(t *testing.T) {
+	// Gap detection must work even when the missing rowid sits exactly
+	// between two pages. With batch=2 and ids 1,2,4,5 the gap (id 3)
+	// is at the page boundary; the streaming scan tracks prevID
+	// across pages, so it still fires.
+	db := newTestDB(t)
+
+	ts := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	insertRow(t, db, "fixture-gap", ts, `{"row":1}`)
+	insertRow(t, db, "fixture-gap", ts, `{"row":2}`)
+	insertRow(t, db, "fixture-gap", ts, `{"row":3}`)
+	insertRow(t, db, "fixture-gap", ts, `{"row":4}`)
+	if _, err := db.Exec(`DELETE FROM audit_log WHERE id = 3`); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	d, err := New(db, nil, &recordingAlerter{}, 0, WithBatchSize(2))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rep, err := d.Check(context.Background())
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if rep.RowidGaps != 1 {
+		t.Fatalf("RowidGaps across page boundary: got %d want 1", rep.RowidGaps)
+	}
+	if len(rep.Findings) != 1 || rep.Findings[0].RowID != 3 {
+		t.Fatalf("Findings: got %+v", rep.Findings)
+	}
+}
+
+func TestCheck_StreamingBatch_ContinuityOnlyStillStreams(t *testing.T) {
+	// Continuity-only mode (reader == nil) still streams; the SQL
+	// cursor is opened but no S3 calls happen. Verify a multi-page
+	// continuity-only run is clean on a dense table.
+	db := newTestDB(t)
+	ts := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 250; i++ {
+		insertRow(t, db, "fixture-co", ts, fmt.Sprintf(`{"i":%d}`, i))
+	}
+	d, err := New(db, nil, &recordingAlerter{}, 0, WithBatchSize(33))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rep, err := d.Check(context.Background())
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if !rep.Clean() {
+		t.Fatalf("expected clean (continuity-only dense), got %+v", rep)
+	}
+	if rep.RowsScanned != 250 {
+		t.Fatalf("RowsScanned: got %d want 250", rep.RowsScanned)
+	}
+	if rep.ColdTierEnabled {
+		t.Fatal("ColdTierEnabled: expected false")
+	}
+}
+
+func TestWithBatchSize_RejectsNonPositive(t *testing.T) {
+	// Non-positive batch sizes must be ignored — the default kicks
+	// in. This protects callers from accidentally building a
+	// detector that loops forever on a zero-LIMIT page.
+	db := newTestDB(t)
+	d, err := New(db, nil, &recordingAlerter{}, 0,
+		WithBatchSize(0), WithBatchSize(-1))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if d.batchSize != DefaultBatchSize {
+		t.Fatalf("batchSize: got %d want %d (default)", d.batchSize, DefaultBatchSize)
+	}
+}
