@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -262,10 +263,16 @@ func TestCheck_MissingS3Object(t *testing.T) {
 		t.Fatalf("Finding.Kind: got %q want %q", f.Kind, AlertKindMissing)
 	}
 
-	// runOnce should fan out exactly one alert.
+	// runOnce should fan out exactly one summary alert (PR #54 batched
+	// per-finding fan-out into one per-pass alert; AlertKindMissing now
+	// appears inside the summary payload's counters, not as a standalone
+	// alerter call).
 	d.runOnce(context.Background())
-	if got := rec.count(AlertKindMissing); got != 1 {
-		t.Fatalf("alerts fired: got %d want 1 of kind=%s", got, AlertKindMissing)
+	if got := rec.count(AlertKindMissing); got != 0 {
+		t.Fatalf("per-kind alerts fired: got %d want 0 (batched into summary)", got)
+	}
+	if got := rec.count(AlertKindSummary); got != 1 {
+		t.Fatalf("summary alerts fired: got %d want 1", got)
 	}
 }
 
@@ -372,7 +379,13 @@ func TestCheck_S3Disabled_NilReader(t *testing.T) {
 	}
 }
 
-func TestCheck_ReadError_FiresReadErrorAlert(t *testing.T) {
+func TestCheck_ReadError_FoldedIntoSummary(t *testing.T) {
+	// Per-row S3 transport errors used to fire AlertKindReadError as
+	// standalone alerter calls (one per row). PR #54 folded those into
+	// the per-pass summary: the read_errors counter is set, the
+	// summary alert fires once, and AlertKindReadError as a standalone
+	// kind is now reserved for the "Check itself failed" path (see
+	// TestRunOnce_ScanLevelError_FiresSummaryWithScanError).
 	db := newTestDB(t)
 	reader := newMockReader()
 	reader.forceErr = errors.New("simulated s3 503")
@@ -386,8 +399,62 @@ func TestCheck_ReadError_FiresReadErrorAlert(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	d.runOnce(context.Background())
-	if got := rec.count(AlertKindReadError); got != 1 {
-		t.Fatalf("read_error alerts: got %d want 1", got)
+
+	if got := rec.count(AlertKindReadError); got != 0 {
+		t.Fatalf("standalone read_error alerts: got %d want 0 (now folded into summary)", got)
+	}
+	if got := rec.count(AlertKindSummary); got != 1 {
+		t.Fatalf("summary alerts: got %d want 1", got)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	ev := rec.events[0]
+	if got, _ := ev.Payload["read_errors"].(int); got != 1 {
+		t.Fatalf("payload.read_errors: got %d want 1", got)
+	}
+}
+
+// errorDBOpen returns a *sql.DB whose connection has been closed, so any
+// query against it errors immediately. Used to simulate the scan-level
+// failure path in TestRunOnce_ScanLevelError_FiresSummaryWithScanError.
+func errorDBOpen(t *testing.T) *sql.DB {
+	t.Helper()
+	db := newTestDB(t)
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	return db
+}
+
+func TestRunOnce_ScanLevelError_FiresSummaryWithScanError(t *testing.T) {
+	// When Check itself errors (the SQLite scan failed — we cannot
+	// enumerate any findings), runOnce still fires exactly ONE
+	// AlertKindSummary alert. The summary payload carries a
+	// "scan_error" key with the failure detail so on-call can
+	// distinguish "scan broke" from "scan ran and found nothing per-
+	// row but had transport errors." This collapses the entire
+	// detector into a single Alert site (eyeball-test invariant).
+	db := errorDBOpen(t)
+	rec := &recordingAlerter{}
+
+	d, err := New(db, nil, rec, 0)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	d.runOnce(context.Background())
+
+	if got := rec.count(AlertKindSummary); got != 1 {
+		t.Fatalf("summary alerts: got %d want 1 (scan-level error folds into summary)", got)
+	}
+	if got := rec.count(AlertKindReadError); got != 0 {
+		t.Fatalf("standalone read_error alerts: got %d want 0 (folded into summary)", got)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	ev := rec.events[0]
+	scanErr, ok := ev.Payload["scan_error"].(string)
+	if !ok || scanErr == "" {
+		t.Fatalf("payload.scan_error: missing or empty (%T %q)", ev.Payload["scan_error"], scanErr)
 	}
 }
 
@@ -885,5 +952,194 @@ func TestCheck_HeadMissing_FiresMissingFinding(t *testing.T) {
 	}
 	if len(rep.Findings) != 1 || rep.Findings[0].Kind != AlertKindMissing {
 		t.Fatalf("Findings: got %+v", rep.Findings)
+	}
+}
+
+// ---------------------------------------------------------------------
+// PR #54 — batched per-pass alerter fan-out.
+//
+// The pre-#54 behaviour fired one alerter.Alert(...) per Finding (up to
+// MaxFindings = 256 calls on a saturated pass). With PagerDuty wired,
+// that meant one tamper event could open 256 incidents. The new
+// contract: exactly one AlertKindSummary call per non-clean pass,
+// carrying the per-kind breakdown + sample of affected rowids.
+// ---------------------------------------------------------------------
+
+func TestCheck_NoFindings_NoAlert(t *testing.T) {
+	// A clean pass (everything staged in WORM, no rowid gaps) must NOT
+	// fire any alerter call. This is the steady-state path; firing on
+	// a clean pass would page on the daily heartbeat.
+	db := newTestDB(t)
+	reader := newMockReader()
+	rec := &recordingAlerter{}
+
+	ts := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 5; i++ {
+		_, hash, body := insertRow(t, db, "fixture-clean", ts, fmt.Sprintf(`{"i":%d}`, i))
+		reader.put(defaultKey("fixture-clean", ts, hash), []byte(body))
+	}
+
+	d, err := New(db, reader, rec, 0)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	d.runOnce(context.Background())
+
+	rec.mu.Lock()
+	got := len(rec.events)
+	rec.mu.Unlock()
+	if got != 0 {
+		t.Fatalf("clean pass fired %d alerter calls; want 0", got)
+	}
+}
+
+func TestCheck_OneFinding_OneAlert(t *testing.T) {
+	// One missing S3 object → one Finding → exactly one summary alert.
+	// Asserts the new per-pass contract holds at the minimum finding
+	// count.
+	db := newTestDB(t)
+	reader := newMockReader()
+	rec := &recordingAlerter{}
+
+	ts := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	_, h1, body1 := insertRow(t, db, "fixture-one", ts, `{"row":1}`)
+	insertRow(t, db, "fixture-one", ts, `{"row":2}`) // S3 object NOT staged
+	_, h3, body3 := insertRow(t, db, "fixture-one", ts, `{"row":3}`)
+	reader.put(defaultKey("fixture-one", ts, h1), []byte(body1))
+	reader.put(defaultKey("fixture-one", ts, h3), []byte(body3))
+
+	d, err := New(db, reader, rec, 0)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	d.runOnce(context.Background())
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if got := len(rec.events); got != 1 {
+		t.Fatalf("alerter calls: got %d want 1", got)
+	}
+	ev := rec.events[0]
+	if ev.Kind != AlertKindSummary {
+		t.Fatalf("alert kind: got %q want %q", ev.Kind, AlertKindSummary)
+	}
+	if got, _ := ev.Payload["missing_objects"].(int); got != 1 {
+		t.Fatalf("payload.missing_objects: got %d want 1", got)
+	}
+	if got, _ := ev.Payload["total_findings"].(int); got != 1 {
+		t.Fatalf("payload.total_findings: got %d want 1", got)
+	}
+}
+
+func TestCheck_256Findings_OneAlert(t *testing.T) {
+	// Saturate the findings cap (MaxFindings = 256). Pre-#54 this would
+	// have fired 256 alerter calls; the new contract is one summary.
+	// Also asserts the per-kind breakdown lives in the summary payload.
+	db := newTestDB(t)
+	reader := newMockReader() // every row's WORM object is missing
+	rec := &recordingAlerter{}
+
+	ts := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < MaxFindings; i++ {
+		insertRow(t, db, "fixture-saturate", ts, fmt.Sprintf(`{"i":%d}`, i))
+	}
+
+	d, err := New(db, reader, rec, 0)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	d.runOnce(context.Background())
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if got := len(rec.events); got != 1 {
+		t.Fatalf("alerter calls: got %d want 1 (per-pass summary, NOT per-finding)", got)
+	}
+	ev := rec.events[0]
+	if ev.Kind != AlertKindSummary {
+		t.Fatalf("alert kind: got %q want %q", ev.Kind, AlertKindSummary)
+	}
+	// Per-kind breakdown must be present and accurate.
+	if got, _ := ev.Payload["missing_objects"].(int); got != MaxFindings {
+		t.Fatalf("payload.missing_objects: got %d want %d", got, MaxFindings)
+	}
+	if got, _ := ev.Payload["hash_mismatches"].(int); got != 0 {
+		t.Fatalf("payload.hash_mismatches: got %d want 0", got)
+	}
+	if got, _ := ev.Payload["rowid_gaps"].(int); got != 0 {
+		t.Fatalf("payload.rowid_gaps: got %d want 0", got)
+	}
+	if got, _ := ev.Payload["read_errors"].(int); got != 0 {
+		t.Fatalf("payload.read_errors: got %d want 0", got)
+	}
+	if got, _ := ev.Payload["total_findings"].(int); got != MaxFindings {
+		t.Fatalf("payload.total_findings: got %d want %d", got, MaxFindings)
+	}
+	if got, _ := ev.Payload["source"].(string); got == "" {
+		t.Fatal("payload.source: empty; want a non-empty source label")
+	}
+	runID, _ := ev.Payload["run_id"].(string)
+	if runID == "" {
+		t.Fatal("payload.run_id: empty")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, runID); err != nil {
+		t.Fatalf("payload.run_id: not RFC3339Nano (%q): %v", runID, err)
+	}
+}
+
+func TestCheck_AlertPayloadIncludesFirst50RowIDs(t *testing.T) {
+	// Stage 100 missing rows. The summary payload must enumerate the
+	// first MaxSampleRowIDs (50) rowids in scan order, set
+	// sample_truncated=true, and include a truncation_note that
+	// references the totals.
+	db := newTestDB(t)
+	reader := newMockReader()
+	rec := &recordingAlerter{}
+
+	ts := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	const total = 100
+	expectedFirst := make([]int64, 0, MaxSampleRowIDs)
+	for i := 0; i < total; i++ {
+		id, _, _ := insertRow(t, db, "fixture-sample", ts, fmt.Sprintf(`{"i":%d}`, i))
+		if i < MaxSampleRowIDs {
+			expectedFirst = append(expectedFirst, id)
+		}
+	}
+
+	d, err := New(db, reader, rec, 0)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	d.runOnce(context.Background())
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if got := len(rec.events); got != 1 {
+		t.Fatalf("alerter calls: got %d want 1", got)
+	}
+	ev := rec.events[0]
+	sample, ok := ev.Payload["sample_row_ids"].([]int64)
+	if !ok {
+		t.Fatalf("payload.sample_row_ids: missing or wrong type (%T)", ev.Payload["sample_row_ids"])
+	}
+	if len(sample) != MaxSampleRowIDs {
+		t.Fatalf("payload.sample_row_ids: len=%d want %d", len(sample), MaxSampleRowIDs)
+	}
+	for i, want := range expectedFirst {
+		if sample[i] != want {
+			t.Fatalf("sample_row_ids[%d]: got %d want %d", i, sample[i], want)
+		}
+	}
+	truncated, _ := ev.Payload["sample_truncated"].(bool)
+	if !truncated {
+		t.Fatal("payload.sample_truncated: got false want true (100 findings > 50 sample cap)")
+	}
+	note, _ := ev.Payload["truncation_note"].(string)
+	if note == "" {
+		t.Fatal("payload.truncation_note: empty; want a human-readable note")
+	}
+	if !strings.Contains(note, fmt.Sprintf("first %d", MaxSampleRowIDs)) ||
+		!strings.Contains(note, fmt.Sprintf("of %d", total)) {
+		t.Fatalf("payload.truncation_note: missing expected fragments: %q", note)
 	}
 }
