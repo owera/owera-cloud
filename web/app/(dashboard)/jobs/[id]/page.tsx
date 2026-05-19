@@ -1,6 +1,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { JobStatusBadge } from "@/components/job-status-badge";
 import { JobTimeline } from "@/components/job-timeline";
@@ -85,6 +86,13 @@ export default async function JobDetailPage({ params }: PageProps) {
   const { id } = await params;
   const { job, ledger, live } = await safeFetch(id);
 
+  const rerunHref = `/compose?sku=${encodeURIComponent(job.skuSlug)}&prompt=${encodeURIComponent(job.inputSummary)}`;
+  // Tool calls in the ledger are the "what the agent did" — pull them out
+  // for a dedicated Plan panel so a user can scan the work at a glance.
+  const planSteps = ledger.filter(
+    (e) => e.kind === "tool_call" || e.kind === "state_change",
+  );
+
   return (
     <div className="space-y-6">
       <header className="flex items-baseline justify-between">
@@ -108,6 +116,27 @@ export default async function JobDetailPage({ params }: PageProps) {
           )}
         </div>
       </header>
+
+      {/* Re-hire actions. The single most important muscle: turn one run into
+         many. */}
+      <section className="border border-[var(--color-rule)] rounded-sm bg-[rgba(0,0,0,0.2)] px-5 py-4 flex flex-wrap items-center gap-3">
+        <div className="flex flex-col gap-1 flex-1 min-w-[200px]">
+          <span className="readout-label">Re-hire this job</span>
+          <span className="text-xs text-[var(--color-ink-dim)]">
+            Run again with the same inputs, change something before re-running,
+            or schedule it to repeat.
+          </span>
+        </div>
+        <Button asChild variant="primary" size="sm">
+          <Link href={rerunHref}>Run again →</Link>
+        </Button>
+        <Button asChild variant="secondary" size="sm">
+          <Link href={`${rerunHref}&edit=1`}>Edit & re-hire</Link>
+        </Button>
+        <Button asChild variant="ghost" size="sm">
+          <Link href={`${rerunHref}&schedule=1`}>Schedule…</Link>
+        </Button>
+      </section>
 
       <section className="grid grid-cols-4 gap-3">
         <Meta label="SKU" value={job.skuSlug} />
@@ -144,6 +173,49 @@ export default async function JobDetailPage({ params }: PageProps) {
           </CardBody>
         </Card>
       )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>PLAN · WHAT THE AGENT IS DOING</CardTitle>
+        </CardHeader>
+        <CardBody>
+          {planSteps.length === 0 ? (
+            <p className="text-sm text-[var(--color-muted-foreground)]">
+              Plan steps will appear as the agent works. Each tool call and
+              state transition is recorded.
+            </p>
+          ) : (
+            <ol className="flex flex-col gap-2">
+              {planSteps.map((step, i) => (
+                <li
+                  key={step.id}
+                  className="flex items-start gap-3 text-sm font-mono"
+                >
+                  <span className="text-[var(--color-muted-foreground)] w-8 shrink-0">
+                    {String(i + 1).padStart(2, "0")}
+                  </span>
+                  <span
+                    className={[
+                      "px-1.5 rounded text-[10px] uppercase tracking-wider",
+                      step.kind === "tool_call"
+                        ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                        : "bg-[var(--color-muted)] text-[var(--color-muted-foreground)]",
+                    ].join(" ")}
+                  >
+                    {step.kind === "tool_call" ? "TOOL" : "STATE"}
+                  </span>
+                  <span className="flex-1 text-[var(--color-foreground)]">
+                    {step.message}
+                  </span>
+                  <span className="text-[10px] text-[var(--color-muted-foreground)]">
+                    {shortTimestamp(step.ts).split(" ").slice(-2).join(" ")}
+                  </span>
+                </li>
+              ))}
+            </ol>
+          )}
+        </CardBody>
+      </Card>
 
       <Card>
         <CardHeader>

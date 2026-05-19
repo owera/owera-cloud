@@ -3,8 +3,14 @@
 // see identical numbers.
 
 import type { SKU } from "@/lib/types";
-import type { ComposeState } from "./state";
+import type { ComposeState, ComposeBudget } from "./state";
 import type { ComplexityLevel } from "./levels";
+
+/** Subset of state that the estimator actually needs. Lets callers pass
+ *  partial fragments (cost-example doc widget) without minting full states. */
+export type EstimateInput = Pick<ComposeState, "level" | "sku" | "tools"> & {
+  budget: ComposeBudget;
+};
 
 /** Multiplier per stop, applied to the SKU base price. Tuned for trust over hype. */
 const COST_FACTOR: Record<ComplexityLevel, number> = {
@@ -47,7 +53,7 @@ export interface CostEstimate {
 }
 
 export function estimate(
-  state: ComposeState,
+  state: EstimateInput,
   skus: ReadonlyArray<SKU> | null = null,
 ): CostEstimate {
   const base = lookupSkuBaseCents(state.sku, skus);

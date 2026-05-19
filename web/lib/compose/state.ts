@@ -1,21 +1,41 @@
-// Compose state machine.
+// Compose state machine — v2.
 //
-// The URL is the source of truth. ComposeState round-trips between:
-//   - URLSearchParams (?level=...&prompt=...&sku=...&tools=...&max_cents=...)
-//   - JSON config (POST body to /api/compose)
-//   - the JobCreate body consumed by api.submitJob
+// A Job has five concerns:
+//   - outcome (archetype)         — what kind of work
+//   - recipe  (sku/inputs/level)  — the underlying agent + quality dial
+//   - cadence (schedule)          — once or recurring
+//   - delivery                    — where output goes
+//   - identity (name / template)  — re-hire ergonomics
 //
-// One parser runs on the server route handler AND the client surface — so the
-// human dragging the slider and the agent POSTing JSON exercise an identical
-// code path. This is the whole point: no second source of truth, ever.
+// The URL is still the source of truth for the slider mini-app, but more
+// elaborate state lives in JSON only (URLs would get unwieldy for archetype
+// inputs). One parser still runs on the server route handler AND the client
+// surface — same shape, same validation, same code path.
 
+import {
+  type ArchetypeId,
+  isArchetypeId,
+  archetypeInitialInputs,
+  getArchetype,
+} from "./archetypes";
+import {
+  type Delivery,
+  type DeliveryKind,
+  isDeliveryKind,
+  DELIVERY_DEFAULTS,
+} from "./delivery";
 import { isComplexityLevel, type ComplexityLevel } from "./levels";
-// Re-export so existing callers that import from state still work.
+import {
+  type Schedule,
+  type ScheduleKind,
+  isScheduleKind,
+  SCHEDULE_DEFAULTS,
+} from "./schedule";
+
 export { isComplexityLevel };
 
 export const DEFAULT_LEVEL: ComplexityLevel = "simple";
 
-/** Default SKU each stop seeds with when the user hasn't picked one. */
 export const DEFAULT_SKU_BY_LEVEL: Record<ComplexityLevel, string> = {
   simple: "triage-watch",
   standard: "triage-watch",
@@ -29,25 +49,74 @@ export interface ComposeBudget {
   maxLatencyMs?: number;
 }
 
+/** v1 inputs payload — keyed string/array/bool from the archetype field set. */
+export type ArchetypeInputs = Record<string, string | string[] | boolean>;
+
 export interface ComposeState {
+  /** Outcome — the kind of job we are composing. */
+  archetype: ArchetypeId;
+  /** Structured inputs for the chosen archetype (per field key). */
+  inputs: ArchetypeInputs;
+
+  /** Recipe — underlying SKU + Quality dial + tools + budget. */
   level: ComplexityLevel;
   sku: string;
-  prompt: string;
-  /** Tools toggled on. Empty for simple. */
   tools: string[];
   budget: ComposeBudget;
-  /** Optional client-supplied idempotency key. */
+
+  /** Cadence — when to run. */
+  schedule: Schedule;
+  /** Delivery — where output lands. */
+  delivery: Delivery;
+
+  /** Identity — short name; if absent we synthesize one from the inputs. */
+  name?: string;
+  /** Save this composition as a template for later re-hire. */
+  saveAsTemplate: boolean;
+
+  /** Legacy free-form prompt (kept for the custom archetype + URL share). */
+  prompt: string;
+
   idempotencyKey?: string;
 }
 
-/** Build the canonical "empty" state for a given stop. */
-export function defaultsForStop(level: ComplexityLevel): ComposeState {
-  const base: ComposeState = {
+/** Build the canonical "empty" state for a given archetype. */
+export function defaultsForArchetype(id: ArchetypeId): ComposeState {
+  const a = getArchetype(id);
+  const recipe = defaultsForStop(a.defaultLevel);
+  return {
+    archetype: id,
+    inputs: archetypeInitialInputs(id),
+    level: a.defaultLevel,
+    sku: a.defaultSku,
+    tools: recipe.tools,
+    budget: recipe.budget,
+    schedule:
+      a.suggestedCadence === "daily"
+        ? SCHEDULE_DEFAULTS.daily
+        : a.suggestedCadence === "weekly"
+          ? SCHEDULE_DEFAULTS.weekly
+          : SCHEDULE_DEFAULTS.once,
+    delivery: DELIVERY_DEFAULTS.dashboard,
+    saveAsTemplate: a.suggestedCadence !== "once",
+    prompt: "",
+  };
+}
+
+/** Build the canonical "empty" recipe for a given Quality stop. */
+export function defaultsForStop(level: ComplexityLevel): {
+  level: ComplexityLevel;
+  sku: string;
+  tools: string[];
+  budget: ComposeBudget;
+  prompt: string;
+} {
+  const base = {
     level,
     sku: DEFAULT_SKU_BY_LEVEL[level],
+    tools: [] as string[],
+    budget: {} as ComposeBudget,
     prompt: "",
-    tools: [],
-    budget: {},
   };
   switch (level) {
     case "simple":
@@ -75,7 +144,49 @@ export function defaultsForStop(level: ComplexityLevel): ComposeState {
   }
 }
 
-/** Parse URL search params into a ComposeState. Invalid values fall back to defaults. */
+/** Resolve the primary natural-language prompt the agent should see. */
+export function resolvePrompt(state: ComposeState): string {
+  // Explicit prompt always wins (custom archetype path).
+  if (state.prompt && state.prompt.trim().length > 0) return state.prompt;
+  // Otherwise prefer the archetype's `isPrimaryPrompt` field, then build
+  // a structured string from the remaining inputs so the underlying agent
+  // gets a coherent task description.
+  const arche = getArchetype(state.archetype);
+  const primaryField = arche.fields.find((f) => f.isPrimaryPrompt);
+  const primary = primaryField
+    ? String(state.inputs[primaryField.key] ?? "")
+    : "";
+  const lines: string[] = [];
+  if (primary) lines.push(primary.trim());
+  for (const f of arche.fields) {
+    if (f.isPrimaryPrompt) continue;
+    const v = state.inputs[f.key];
+    if (v === undefined || v === "" || (Array.isArray(v) && v.length === 0)) {
+      continue;
+    }
+    const display = Array.isArray(v) ? v.join(", ") : String(v);
+    lines.push(`${f.label}: ${display}`);
+  }
+  return lines.join("\n\n").trim();
+}
+
+/** Synthesize a short job name from inputs when the user hasn't supplied one. */
+export function resolveJobName(state: ComposeState): string {
+  if (state.name && state.name.trim()) return state.name.trim();
+  const arche = getArchetype(state.archetype);
+  const primaryField = arche.fields.find((f) => f.isPrimaryPrompt);
+  const primary = primaryField
+    ? String(state.inputs[primaryField.key] ?? "").trim()
+    : state.prompt.trim();
+  if (primary) {
+    const short = primary.split(/[.!?\n]/)[0]?.slice(0, 60) ?? primary.slice(0, 60);
+    return `${arche.name} — ${short}`;
+  }
+  return arche.name;
+}
+
+/* ---------------------------- URL <-> state ---------------------------- */
+
 export function parseFromSearchParams(
   params: URLSearchParams | Record<string, string | string[] | undefined>,
 ): ComposeState {
@@ -86,67 +197,73 @@ export function parseFromSearchParams(
     return raw;
   };
 
+  const rawArche = get("archetype");
+  const archetype: ArchetypeId = isArchetypeId(rawArche) ? rawArche : "custom";
+  const seeded = defaultsForArchetype(archetype);
+
   const rawLevel = get("level");
-  const level: ComplexityLevel = isComplexityLevel(rawLevel)
-    ? rawLevel
-    : DEFAULT_LEVEL;
+  if (isComplexityLevel(rawLevel)) seeded.level = rawLevel;
 
-  const seeded = defaultsForStop(level);
+  const recipe = defaultsForStop(seeded.level);
+  seeded.tools = recipe.tools;
+  seeded.budget = recipe.budget;
 
-  const sku = get("sku")?.trim() || seeded.sku;
+  const sku = get("sku")?.trim();
+  if (sku) seeded.sku = sku;
+
   const prompt = get("prompt") ?? "";
+  if (prompt) seeded.prompt = prompt;
 
   const rawTools = get("tools");
-  const tools = rawTools
-    ? rawTools
-        .split(",")
-        .map((t) => t.trim())
-        .filter(Boolean)
-    : seeded.tools;
+  if (rawTools !== undefined) {
+    seeded.tools = rawTools
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+  }
 
   const maxCentsRaw = get("max_cents");
-  const maxLatencyRaw = get("max_latency_ms");
-  const budget: ComposeBudget = {};
   if (maxCentsRaw && Number.isFinite(Number(maxCentsRaw))) {
-    budget.maxCents = Math.max(0, Math.floor(Number(maxCentsRaw)));
-  } else if (seeded.budget.maxCents !== undefined) {
-    budget.maxCents = seeded.budget.maxCents;
+    seeded.budget.maxCents = Math.max(0, Math.floor(Number(maxCentsRaw)));
   }
+  const maxLatencyRaw = get("max_latency_ms");
   if (maxLatencyRaw && Number.isFinite(Number(maxLatencyRaw))) {
-    budget.maxLatencyMs = Math.max(0, Math.floor(Number(maxLatencyRaw)));
-  } else if (seeded.budget.maxLatencyMs !== undefined) {
-    budget.maxLatencyMs = seeded.budget.maxLatencyMs;
+    seeded.budget.maxLatencyMs = Math.max(0, Math.floor(Number(maxLatencyRaw)));
   }
 
   const idempotencyKey = get("idempotency_key")?.trim() || undefined;
+  if (idempotencyKey) seeded.idempotencyKey = idempotencyKey;
 
-  return { level, sku, prompt, tools, budget, idempotencyKey };
+  return seeded;
 }
 
-/** Emit URL search params. Empty/default fields are omitted to keep URLs short. */
+/** Emit URL search params — only the slider-relevant subset round-trips here.
+ *
+ * Larger state (archetype inputs, schedule, delivery) stays in form state and
+ * gets posted as JSON. We keep URLs human-shareable instead of stuffing
+ * everything into them. */
 export function toSearchParams(state: ComposeState): URLSearchParams {
   const out = new URLSearchParams();
+  if (state.archetype !== "custom") out.set("archetype", state.archetype);
   out.set("level", state.level);
-  const seeded = defaultsForStop(state.level);
-
-  if (state.sku && state.sku !== seeded.sku) out.set("sku", state.sku);
+  const recipe = defaultsForStop(state.level);
+  if (state.sku && state.sku !== recipe.sku) out.set("sku", state.sku);
   if (state.prompt) out.set("prompt", state.prompt);
-
   const toolsSorted = [...state.tools].sort();
-  const seededToolsSorted = [...seeded.tools].sort();
-  if (toolsSorted.join(",") !== seededToolsSorted.join(",")) {
+  const recipeToolsSorted = [...recipe.tools].sort();
+  if (toolsSorted.join(",") !== recipeToolsSorted.join(",")) {
     if (toolsSorted.length) out.set("tools", toolsSorted.join(","));
     else out.set("tools", "");
   }
   if (
     state.budget.maxCents !== undefined &&
-    state.budget.maxCents !== seeded.budget.maxCents
+    state.budget.maxCents !== recipe.budget.maxCents
   ) {
     out.set("max_cents", String(state.budget.maxCents));
   }
   if (
     state.budget.maxLatencyMs !== undefined &&
-    state.budget.maxLatencyMs !== seeded.budget.maxLatencyMs
+    state.budget.maxLatencyMs !== recipe.budget.maxLatencyMs
   ) {
     out.set("max_latency_ms", String(state.budget.maxLatencyMs));
   }
@@ -154,21 +271,36 @@ export function toSearchParams(state: ComposeState): URLSearchParams {
   return out;
 }
 
-/** Wire JSON shape exposed at /api/compose and /api/compose/schema. */
+/* ------------------------- JSON wire shape ---------------------------- */
+
 export interface ComposeJson {
+  archetype?: ArchetypeId;
+  inputs?: ArchetypeInputs;
   level: ComplexityLevel;
   sku: string;
   prompt: string;
   tools?: string[];
   budget?: { max_cents?: number; max_latency_ms?: number };
+  schedule?: {
+    kind: ScheduleKind;
+    time?: string;
+    weekdays?: number[];
+    cron?: string;
+    timezone?: string;
+  };
+  delivery?: { kind: DeliveryKind; target?: string };
+  name?: string;
+  save_as_template?: boolean;
   idempotency_key?: string;
 }
 
 export function toJson(state: ComposeState): ComposeJson {
   const out: ComposeJson = {
+    archetype: state.archetype,
+    inputs: state.inputs,
     level: state.level,
     sku: state.sku,
-    prompt: state.prompt,
+    prompt: resolvePrompt(state),
   };
   if (state.tools.length) out.tools = [...state.tools].sort();
   if (
@@ -181,44 +313,113 @@ export function toJson(state: ComposeState): ComposeJson {
     if (state.budget.maxLatencyMs !== undefined)
       out.budget.max_latency_ms = state.budget.maxLatencyMs;
   }
+  if (state.schedule.kind !== "once") {
+    out.schedule = {
+      kind: state.schedule.kind,
+      ...(state.schedule.time !== undefined ? { time: state.schedule.time } : {}),
+      ...(state.schedule.weekdays
+        ? { weekdays: [...state.schedule.weekdays] }
+        : {}),
+      ...(state.schedule.cron !== undefined ? { cron: state.schedule.cron } : {}),
+      ...(state.schedule.timezone
+        ? { timezone: state.schedule.timezone }
+        : {}),
+    };
+  }
+  if (state.delivery.kind !== "dashboard") {
+    out.delivery = {
+      kind: state.delivery.kind,
+      ...(state.delivery.target ? { target: state.delivery.target } : {}),
+    };
+  }
+  if (state.name) out.name = state.name;
+  if (state.saveAsTemplate) out.save_as_template = true;
   if (state.idempotencyKey) out.idempotency_key = state.idempotencyKey;
   return out;
 }
 
-/** Round-trip from posted JSON back to ComposeState (with defaults). */
 export function fromJson(json: ComposeJson): ComposeState {
-  const level: ComplexityLevel = isComplexityLevel(json.level)
-    ? json.level
-    : DEFAULT_LEVEL;
-  const seeded = defaultsForStop(level);
-  return {
-    level,
-    sku: json.sku?.trim() || seeded.sku,
-    prompt: json.prompt ?? "",
-    tools: Array.isArray(json.tools) ? json.tools.filter(Boolean) : seeded.tools,
-    budget: {
-      maxCents: json.budget?.max_cents ?? seeded.budget.maxCents,
-      maxLatencyMs: json.budget?.max_latency_ms ?? seeded.budget.maxLatencyMs,
-    },
-    idempotencyKey: json.idempotency_key,
-  };
+  const archetype: ArchetypeId = isArchetypeId(json.archetype)
+    ? json.archetype
+    : "custom";
+  const seeded = defaultsForArchetype(archetype);
+  if (isComplexityLevel(json.level)) seeded.level = json.level;
+  const recipe = defaultsForStop(seeded.level);
+  seeded.tools = recipe.tools;
+  seeded.budget = recipe.budget;
+  if (json.sku?.trim()) seeded.sku = json.sku.trim();
+  seeded.prompt = json.prompt ?? "";
+  if (json.inputs && typeof json.inputs === "object") {
+    seeded.inputs = { ...seeded.inputs, ...json.inputs };
+  }
+  if (Array.isArray(json.tools)) seeded.tools = json.tools.filter(Boolean);
+  if (json.budget?.max_cents !== undefined)
+    seeded.budget.maxCents = json.budget.max_cents;
+  if (json.budget?.max_latency_ms !== undefined)
+    seeded.budget.maxLatencyMs = json.budget.max_latency_ms;
+  if (json.schedule && isScheduleKind(json.schedule.kind)) {
+    seeded.schedule = {
+      kind: json.schedule.kind,
+      time: json.schedule.time,
+      weekdays: json.schedule.weekdays,
+      cron: json.schedule.cron,
+      timezone: json.schedule.timezone,
+    };
+  }
+  if (json.delivery && isDeliveryKind(json.delivery.kind)) {
+    seeded.delivery = {
+      kind: json.delivery.kind,
+      target: json.delivery.target,
+    };
+  }
+  if (typeof json.name === "string") seeded.name = json.name;
+  if (typeof json.save_as_template === "boolean")
+    seeded.saveAsTemplate = json.save_as_template;
+  if (json.idempotency_key) seeded.idempotencyKey = json.idempotency_key;
+  return seeded;
 }
 
-/** Adapter: ComposeState → JobCreate body for api.submitJob. */
+/* ------------------ Adapter: state -> JobCreate body ------------------ */
+
 export function composeStateToJobCreate(state: ComposeState): {
   sku: string;
   inputs: Record<string, unknown>;
   idempotencyKey?: string;
 } {
+  const prompt = resolvePrompt(state);
   const inputs: Record<string, unknown> = {
-    prompt: state.prompt,
+    prompt,
     owera_level: state.level,
+    owera_archetype: state.archetype,
   };
+  // Surface structured inputs so the upstream agent can use them
+  // without parsing the rendered prompt string.
+  if (state.archetype !== "custom") {
+    inputs.owera_archetype_inputs = state.inputs;
+  }
   if (state.tools.length) inputs.tools = state.tools;
   if (state.budget.maxCents !== undefined)
     inputs.max_cents = state.budget.maxCents;
   if (state.budget.maxLatencyMs !== undefined)
     inputs.max_latency_ms = state.budget.maxLatencyMs;
+  if (state.schedule.kind !== "once") {
+    inputs.owera_schedule = {
+      kind: state.schedule.kind,
+      time: state.schedule.time,
+      weekdays: state.schedule.weekdays,
+      cron: state.schedule.cron,
+      timezone: state.schedule.timezone,
+    };
+  }
+  if (state.delivery.kind !== "dashboard") {
+    inputs.owera_delivery = {
+      kind: state.delivery.kind,
+      target: state.delivery.target,
+    };
+  }
+  const name = resolveJobName(state);
+  if (name) inputs.owera_name = name;
+  if (state.saveAsTemplate) inputs.owera_save_as_template = true;
   return {
     sku: state.sku,
     inputs,

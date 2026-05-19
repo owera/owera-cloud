@@ -1,12 +1,13 @@
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
-import { toSearchParams } from "@/lib/compose/state";
 import type { ComplexityLevel } from "@/lib/compose/levels";
+import type { ArchetypeId } from "@/lib/compose/archetypes";
 
 interface RunInComposeProps {
   level: ComplexityLevel;
   prompt: string;
   sku?: string;
+  archetype?: ArchetypeId;
   label?: string;
 }
 
@@ -18,17 +19,14 @@ export function RunInCompose({
   level,
   prompt,
   sku,
+  archetype,
   label = "Try this in compose",
 }: RunInComposeProps) {
-  const qs = toSearchParams({
-    level,
-    sku: sku ?? "",
-    prompt,
-    tools: [],
-    budget: {},
-  });
-  // toSearchParams drops empty sku via the seeded-default check; ensure we
-  // explicitly set the prompt + level (which it does).
+  const qs = new URLSearchParams();
+  if (archetype) qs.set("archetype", archetype);
+  qs.set("level", level);
+  if (sku) qs.set("sku", sku);
+  if (prompt) qs.set("prompt", prompt);
   const href = `/compose?${qs.toString()}`;
   return (
     <Button asChild variant="primary" size="sm" className="not-prose">

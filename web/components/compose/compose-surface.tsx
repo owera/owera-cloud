@@ -68,6 +68,7 @@ export function ComposeSurface({
     setState((prev) => {
       const seeded = defaultsForStop(level);
       return {
+        ...prev,
         ...seeded,
         prompt: prev.prompt,
         sku: prev.sku || seeded.sku,

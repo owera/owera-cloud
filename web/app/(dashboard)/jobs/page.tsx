@@ -1,8 +1,10 @@
 import * as React from "react";
 import Link from "next/link";
-import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { JobsTable } from "@/components/jobs-table";
-import { SubmitJobForm } from "@/components/submit-job-form";
+import { TemplateCard } from "@/components/compose/template-card";
+import { STARTER_TEMPLATES } from "@/lib/compose/templates";
 import { api } from "@/lib/api-client";
 import { JOB_STATES, type Job, type JobState } from "@/lib/types";
 
@@ -78,7 +80,6 @@ const FIXTURE: Job[] = [
 ];
 
 interface PageProps {
-  // Next 15 — searchParams is an async prop in App Router.
   searchParams?: Promise<{ state?: string }>;
 }
 
@@ -106,39 +107,63 @@ export default async function JobsPage({ searchParams }: PageProps) {
   const { jobs, live } = await safeList(state);
 
   return (
-    <div className="space-y-4">
-      <header className="flex items-baseline justify-between">
-        <h1 className="font-mono text-xl font-semibold tracking-tight">JOBS</h1>
-        {!live && (
-          <span className="text-[10px] uppercase tracking-wide font-mono text-[var(--color-state-running)]">
-            FIXTURE DATA — API not reachable
-          </span>
-        )}
-      </header>
+    <div className="space-y-8">
+      {/* Hero / hire CTA. */}
+      <section className="flex items-center justify-between gap-4 border-b border-[var(--color-rule)] pb-5">
+        <div className="flex flex-col gap-1">
+          <span className="readout-label">YOUR JOBS</span>
+          <h1 className="font-mono text-xl tracking-tight">
+            Run, re-run, or schedule.
+          </h1>
+          <p className="text-sm text-[var(--color-ink-dim)]">
+            Hire a new job from a template, or re-run anything in the list.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {!live && (
+            <span className="text-[10px] uppercase tracking-wide font-mono text-[var(--color-state-running)]">
+              FIXTURE DATA
+            </span>
+          )}
+          <Button asChild variant="primary" className="h-10 px-5">
+            <Link href="/compose">Compose new →</Link>
+          </Button>
+        </div>
+      </section>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>SUBMIT</CardTitle>
-        </CardHeader>
-        <CardBody>
-          <SubmitJobForm />
-        </CardBody>
-      </Card>
+      {/* Templates / re-hire surface. */}
+      <section className="flex flex-col gap-3">
+        <header className="flex items-baseline justify-between border-b border-[var(--color-rule)] pb-2">
+          <span className="readout-label">Templates · start here</span>
+          <span className="readout-label">RE-HIRE WITH ONE CLICK</span>
+        </header>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {STARTER_TEMPLATES.map((t) => (
+            <TemplateCard key={t.id} seed={t} hint="Open in composer →" />
+          ))}
+        </div>
+      </section>
 
-      <div className="flex items-center gap-2 text-xs font-mono">
-        <FilterLink current={state} target={undefined}>
-          ALL
-        </FilterLink>
-        {JOB_STATES.map((s) => (
-          <FilterLink key={s} current={state} target={s}>
-            {s.toUpperCase()}
+      {/* Filters + table. */}
+      <section className="flex flex-col gap-3">
+        <header className="flex items-baseline justify-between border-b border-[var(--color-rule)] pb-2">
+          <span className="readout-label">Recent runs</span>
+          <span className="readout-label">{jobs.length} JOB(S)</span>
+        </header>
+        <div className="flex items-center gap-2 text-xs font-mono">
+          <FilterLink current={state} target={undefined}>
+            ALL
           </FilterLink>
-        ))}
-      </div>
-
-      <Card>
-        <JobsTable jobs={jobs} />
-      </Card>
+          {JOB_STATES.map((s) => (
+            <FilterLink key={s} current={state} target={s}>
+              {s.toUpperCase()}
+            </FilterLink>
+          ))}
+        </div>
+        <Card>
+          <JobsTable jobs={jobs} />
+        </Card>
+      </section>
     </div>
   );
 }

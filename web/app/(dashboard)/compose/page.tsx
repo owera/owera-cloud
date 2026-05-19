@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ComposeSurface } from "@/components/compose/compose-surface";
+import { Composer } from "@/components/compose/composer";
 import { parseFromSearchParams } from "@/lib/compose/state";
 import { api } from "@/lib/api-client";
 import { getCurrentUser } from "@/lib/auth";
@@ -10,20 +10,18 @@ interface PageProps {
 }
 
 /**
- * /compose — the slider front door.
+ * /compose — the slider front door, v2 (four-step composer).
  *
- * URL is the source of truth. The same parser runs here (SSR) and in
- * /api/compose so dragging the slider, copy-pasting a link, or POSTing JSON
- * all produce the same job.
+ * URL search params seed the initial state so deep-links from docs land on
+ * the right archetype + Quality dial. The same parser runs here (SSR) and
+ * in /api/compose so a dragged-slider job and a POSTed JSON job exercise the
+ * same code path.
  */
 export default async function ComposePage({ searchParams }: PageProps) {
   const params = await searchParams;
   const state = parseFromSearchParams(params);
 
-  const [user, skus] = await Promise.all([
-    getCurrentUser(),
-    safeListSkus(),
-  ]);
+  const [user, skus] = await Promise.all([getCurrentUser(), safeListSkus()]);
 
   // For now: signed-in = "free" plan unless explicitly paid via session metadata.
   // The /api/compose route does the authoritative tier check on submit.
@@ -33,13 +31,7 @@ export default async function ComposePage({ searchParams }: PageProps) {
       : "free"
     : "anonymous";
 
-  return (
-    <ComposeSurface
-      initialState={state}
-      skus={skus}
-      plan={plan}
-    />
-  );
+  return <Composer initialState={state} skus={skus} plan={plan} />;
 }
 
 async function safeListSkus(): Promise<SKU[]> {
