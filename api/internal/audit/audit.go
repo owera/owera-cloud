@@ -187,6 +187,59 @@ func (l *Log) backfillChain() error {
 
 // Append writes one audit entry. Append serializes on the chain so two
 // concurrent callers can't both build off the same prev_hash.
+//
+// # Invariant: do not wrap Append in a roll-back-able transaction
+//
+// Callers MUST NOT call Append from inside a SQL transaction (sql.Tx or
+// equivalent) that may roll back. Append owns its own write; the audit
+// log is not a participant in caller-level units of work.
+//
+// Why: the audit_log primary key is SQLite INTEGER PRIMARY KEY
+// AUTOINCREMENT. SQLite reserves the next id at INSERT-statement start
+// and bumps sqlite_sequence even if the surrounding transaction later
+// rolls back. The reserved id is therefore consumed but no row is
+// written — a permanent gap in the id sequence. The tamper-detect cron
+// (see package audit/tamperdetect) treats any gap as evidence that a
+// row was DELETEd to hide an event and fires an
+// audit.tamper.rowid_gap Critical alert against that ghost id, on
+// every run, forever. There is no in-band way to distinguish a
+// rolled-back ghost id from a maliciously deleted row.
+//
+// Anti-pattern (do NOT do this):
+//
+//	tx, _ := db.BeginTx(ctx, nil)
+//	// ... some work ...
+//	if err := auditLog.Append(ctx, entry); err != nil {
+//	    tx.Rollback() // BAD: leaks an audit_log id even on the happy
+//	                  //     path if "some work" later fails.
+//	    return err
+//	}
+//	if err := doMoreWork(tx); err != nil {
+//	    tx.Rollback() // BAD: ditto — Append already inserted and
+//	                  //     consumed an id; rollback won't undo the
+//	                  //     id reservation.
+//	    return err
+//	}
+//	tx.Commit()
+//
+// Correct pattern: append the audit row after the business transaction
+// has committed (Append-after-commit), or — if you need an "undo"
+// semantic on the audit trail itself — append a compensating audit
+// row describing the reversal. The chain stays linear and gap-free
+// either way:
+//
+//	if err := tx.Commit(); err != nil {
+//	    return err
+//	}
+//	_ = auditLog.Append(ctx, entry) // post-commit
+//
+//	// If business logic later decides the action was wrong:
+//	_ = auditLog.Append(ctx, compensatingEntry) // not a rollback
+//
+// This invariant is documentation-only today; there is no runtime or
+// static check enforcing it. A vet/linter rule that flags tx.Rollback
+// in code paths reachable from Append is a possible future addition
+// (see owera-cloud#55) but is out of scope here.
 func (l *Log) Append(ctx context.Context, e Entry) error {
 	if e.TenantID == "" || e.Action == "" {
 		return errors.New("audit: tenant_id and action required")

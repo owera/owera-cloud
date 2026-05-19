@@ -21,6 +21,7 @@ This is a public repository operated by Owera Software Ltda. Issues are welcome;
   - `gitleaks` finds no secrets (`secret-scan.yml`).
 - Each PR is small and self-contained. Multi-surface changes (touches `api/` and `web/` together) are flagged for review.
 - New SKUs: one PR per SKU, scoped to `api/internal/catalog/<sku>.go` + scenario fixture + customer-facing doc entry under `docs/pricing.md`. Bigger structural changes don't ride along.
+- **Audit log invariant**: never call `audit.Log.Append` from inside a SQL transaction that may roll back. SQLite reserves the AUTOINCREMENT id at INSERT-statement start; a rollback consumes the id but writes no row, leaving a permanent gap that the tamper-detect cron will flag as `audit.tamper.rowid_gap` forever. Append after commit, or append a compensating row instead of rolling back. See the godoc on `audit.Log.Append` in `api/internal/audit/audit.go`.
 - Bump [`VERSION`](VERSION) and update [`CHANGELOG.md`](CHANGELOG.md) for anything that affects customers (API change, pricing change, SLA change). Internal refactors don't bump the version.
 - Fill out the [`PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md) honestly — including the **Compliance impact** section. Compliance review happens at PR time, not after merge.
 

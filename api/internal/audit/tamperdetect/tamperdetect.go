@@ -30,6 +30,12 @@
 // Check method short-circuits with a clean report in that case so the
 // boot fingerprint can still advertise "tamper_detect=on (continuity-
 // only)" without burying the operator in noise.
+//
+// The continuity check is sensitive to rowid gaps. The "no
+// rolled-back transactions around audit.Append" invariant that keeps
+// the id sequence dense is documented on audit.Log.Append; see that
+// godoc before adding any new caller that touches the audit log from
+// inside a transaction.
 package tamperdetect
 
 import (
