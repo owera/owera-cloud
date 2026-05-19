@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -56,21 +57,25 @@ func NewMockWORMStreamer(retention time.Duration) *MockWORMStreamer {
 
 // PutEntry writes an entry to the mock WORM. If a key is already
 // present and inside its retention window, returns ErrWORMLocked.
-func (s *MockWORMStreamer) PutEntry(_ context.Context, e Entry, canonical []byte) error {
+// Returns the stored object's ETag (sha256-hex of the canonical bytes)
+// so Log.Append can record it on audit_log.s3_etag — mirrors what real
+// S3 returns in the ETag response header for non-multipart PUTs.
+func (s *MockWORMStreamer) PutEntry(_ context.Context, e Entry, canonical []byte) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := wormKey(e)
 	now := time.Now().UTC()
 	if existing, ok := s.objects[key]; ok && now.Before(existing.retentionTill) {
-		return fmt.Errorf("%w: key=%s retained_until=%s", ErrWORMLocked, key, existing.retentionTill.Format(time.RFC3339))
+		return "", fmt.Errorf("%w: key=%s retained_until=%s", ErrWORMLocked, key, existing.retentionTill.Format(time.RFC3339))
 	}
 	sum := sha256.Sum256(canonical)
+	etag := hex.EncodeToString(sum[:])
 	s.objects[key] = mockObject{
 		body:          append([]byte(nil), canonical...),
-		etag:          hex.EncodeToString(sum[:]),
+		etag:          etag,
 		retentionTill: now.Add(s.retention),
 	}
-	return nil
+	return etag, nil
 }
 
 // TamperPut directly attempts to overwrite an existing key with new
@@ -142,13 +147,17 @@ type S3WORMStreamer struct {
 
 // PutEntry uploads one entry to the bucket with object-lock retention.
 // Returns ErrWORMLocked wrapped in a fmt.Errorf if the bucket rejects
-// the PUT for retention reasons.
-func (s *S3WORMStreamer) PutEntry(ctx context.Context, e Entry, canonical []byte) error {
+// the PUT for retention reasons. On success, returns the object's ETag
+// (bare hex; S3's surrounding double-quotes are stripped) so the caller
+// can persist it on audit_log.s3_etag. An empty string is returned if
+// the backend did not surface an ETag header — that is treated as a
+// soft signal by tamperdetect (NULL/empty → fall back to full-body GET).
+func (s *S3WORMStreamer) PutEntry(ctx context.Context, e Entry, canonical []byte) (string, error) {
 	if s.HTTPClient == nil {
-		return errors.New("audit: S3WORMStreamer.HTTPClient is nil (need SigV4 transport)")
+		return "", errors.New("audit: S3WORMStreamer.HTTPClient is nil (need SigV4 transport)")
 	}
 	if s.Bucket == "" || s.Endpoint == "" {
-		return errors.New("audit: S3WORMStreamer needs Bucket and Endpoint")
+		return "", errors.New("audit: S3WORMStreamer needs Bucket and Endpoint")
 	}
 	if s.RetentionDays <= 0 {
 		s.RetentionDays = 2555 // 7y default
@@ -157,7 +166,7 @@ func (s *S3WORMStreamer) PutEntry(ctx context.Context, e Entry, canonical []byte
 	url := fmt.Sprintf("%s/%s/%s", s.Endpoint, s.Bucket, key)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(canonical))
 	if err != nil {
-		return err
+		return "", err
 	}
 	retainUntil := time.Now().UTC().Add(time.Duration(s.RetentionDays) * 24 * time.Hour)
 	req.Header.Set("Content-Type", "application/json")
@@ -165,16 +174,20 @@ func (s *S3WORMStreamer) PutEntry(ctx context.Context, e Entry, canonical []byte
 	req.Header.Set("x-amz-object-lock-retain-until-date", retainUntil.Format(time.RFC3339))
 	resp, err := s.HTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("audit: s3 put: %w", err)
+		return "", fmt.Errorf("audit: s3 put: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusForbidden {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("%w: %s", ErrWORMLocked, string(body))
+		return "", fmt.Errorf("%w: %s", ErrWORMLocked, string(body))
 	}
 	if resp.StatusCode/100 != 2 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("audit: s3 put status=%d body=%s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("audit: s3 put status=%d body=%s", resp.StatusCode, string(body))
 	}
-	return nil
+	// S3 returns the ETag wrapped in double quotes, e.g. `"abc123..."`.
+	// Strip them so the value matches what HEAD will return after the
+	// reader package's own normalisation — both sides store bare hex.
+	etag := strings.Trim(resp.Header.Get("ETag"), `"`)
+	return etag, nil
 }

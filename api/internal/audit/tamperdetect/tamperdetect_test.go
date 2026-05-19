@@ -19,20 +19,42 @@ import (
 // canonical bytes per key; GetEntry returns ErrObjectNotFound for any
 // key not present unless ForceError is set (which simulates an S3
 // outage and fans out to the read_error alert kind).
+//
+// HEAD support (#53): putWithEtag stages an explicit ETag for HEAD
+// probes. Otherwise HeadEntry derives an ETag deterministically as
+// sha256-hex(body), which matches what audit.MockWORMStreamer does in
+// production-mock paths. headForceErr (separate from forceErr) lets a
+// test exercise the "HEAD fails, fall back to GET" defensive path
+// without making GET fail too.
 type mockReader struct {
-	mu         sync.Mutex
-	objects    map[string][]byte
-	forceErr   error
-	getCalls   int
-	missingKey string // when non-empty, this key alone returns ErrObjectNotFound
+	mu           sync.Mutex
+	objects      map[string][]byte
+	etags        map[string]string // explicit per-key ETag override
+	forceErr     error
+	headForceErr error
+	getCalls     int
+	headCalls    int
+	missingKey   string // when non-empty, this key alone returns ErrObjectNotFound
 }
 
-func newMockReader() *mockReader { return &mockReader{objects: map[string][]byte{}} }
+func newMockReader() *mockReader {
+	return &mockReader{objects: map[string][]byte{}, etags: map[string]string{}}
+}
 
 func (m *mockReader) put(key string, body []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.objects[key] = append([]byte(nil), body...)
+}
+
+// putWithEtag stages a body AND pins an explicit ETag for HEAD lookup.
+// Used by HEAD-path tests that need to make HEAD's ETag diverge from
+// the body's sha256 (or match a value Append recorded earlier).
+func (m *mockReader) putWithEtag(key string, body []byte, etag string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.objects[key] = append([]byte(nil), body...)
+	m.etags[key] = etag
 }
 
 func (m *mockReader) GetEntry(_ context.Context, key string) ([]byte, error) {
@@ -50,6 +72,31 @@ func (m *mockReader) GetEntry(_ context.Context, key string) ([]byte, error) {
 		return nil, ErrObjectNotFound
 	}
 	return body, nil
+}
+
+// HeadEntry returns the per-key ETag if one was staged via putWithEtag,
+// otherwise the sha256-hex of the staged body (the natural
+// MockWORMStreamer convention). missingKey suppresses HEAD too;
+// headForceErr lets tests exercise the GET-fallback path.
+func (m *mockReader) HeadEntry(_ context.Context, key string) (string, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.headCalls++
+	if m.headForceErr != nil {
+		return "", false, m.headForceErr
+	}
+	if m.missingKey != "" && key == m.missingKey {
+		return "", false, nil
+	}
+	body, ok := m.objects[key]
+	if !ok {
+		return "", false, nil
+	}
+	if etag, pinned := m.etags[key]; pinned {
+		return etag, true, nil
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:]), true, nil
 }
 
 // recordingAlerter captures (kind, payload) tuples so tests can assert
@@ -107,12 +154,24 @@ func newTestDB(t *testing.T) *sql.DB {
 		ip          TEXT NOT NULL,
 		user_agent  TEXT NOT NULL,
 		prev_hash   TEXT NOT NULL DEFAULT '',
-		hash        TEXT NOT NULL DEFAULT ''
+		hash        TEXT NOT NULL DEFAULT '',
+		s3_etag     TEXT
 	)`)
 	if err != nil {
 		t.Fatalf("create table: %v", err)
 	}
 	return db
+}
+
+// setEtag stamps audit_log.s3_etag for the given row. Tests use this
+// to simulate the post-#53 Append flow without depending on the audit
+// package's UPDATE machinery — keeps the tamperdetect tests focused on
+// the read path.
+func setEtag(t *testing.T, db *sql.DB, id int64, etag string) {
+	t.Helper()
+	if _, err := db.Exec(`UPDATE audit_log SET s3_etag = ? WHERE id = ?`, etag, id); err != nil {
+		t.Fatalf("set etag: %v", err)
+	}
 }
 
 // insertRow inserts one audit_log row and returns its rowid, ts, hash
@@ -326,7 +385,7 @@ func TestCheck_ReadError_FoldedIntoSummary(t *testing.T) {
 	// the per-pass summary: the read_errors counter is set, the
 	// summary alert fires once, and AlertKindReadError as a standalone
 	// kind is now reserved for the "Check itself failed" path (see
-	// TestRunOnce_ScanLevelError_FiresReadErrorAlert).
+	// TestRunOnce_ScanLevelError_FiresSummaryWithScanError).
 	db := newTestDB(t)
 	reader := newMockReader()
 	reader.forceErr = errors.New("simulated s3 503")
@@ -355,10 +414,9 @@ func TestCheck_ReadError_FoldedIntoSummary(t *testing.T) {
 	}
 }
 
-// errorDBOpen returns a *sql.DB whose QueryContext returns an error.
-// Achieved by closing the DB before handing it back — every subsequent
-// driver call errors with sql.ErrConnDone. Cheaper than building a
-// full driver shim for one assertion.
+// errorDBOpen returns a *sql.DB whose connection has been closed, so any
+// query against it errors immediately. Used to simulate the scan-level
+// failure path in TestRunOnce_ScanLevelError_FiresSummaryWithScanError.
 func errorDBOpen(t *testing.T) *sql.DB {
 	t.Helper()
 	db := newTestDB(t)
@@ -509,6 +567,21 @@ func (c *concurrencyReader) GetEntry(ctx context.Context, key string) ([]byte, e
 		c.mu.Unlock()
 	}()
 	return c.inner.GetEntry(ctx, key)
+}
+
+func (c *concurrencyReader) HeadEntry(ctx context.Context, key string) (string, bool, error) {
+	c.mu.Lock()
+	c.inflight++
+	if c.inflight > c.peak {
+		c.peak = c.inflight
+	}
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.inflight--
+		c.mu.Unlock()
+	}()
+	return c.inner.HeadEntry(ctx, key)
 }
 
 // runCheck is a small helper to build a Detector with the given batch
@@ -691,6 +764,197 @@ func TestWithBatchSize_RejectsNonPositive(t *testing.T) {
 	}
 }
 
+// --- #53: HEAD-based ETag integrity (+ GET fallback) ---
+
+// TestCheck_HeadETagMatch_PassesWithoutGET stages rows with a known
+// s3_etag stamped on audit_log.s3_etag and a matching object in the
+// mock reader. The detector must take the HEAD-only path: zero GETs,
+// one HEAD per row, clean report.
+func TestCheck_HeadETagMatch_PassesWithoutGET(t *testing.T) {
+	db := newTestDB(t)
+	reader := newMockReader()
+	rec := &recordingAlerter{}
+
+	ts := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	const total = 5
+	for i := 0; i < total; i++ {
+		payload := fmt.Sprintf(`{"row":%d}`, i)
+		id, hash, body := insertRow(t, db, "fixture-head", ts, payload)
+		key := defaultKey("fixture-head", ts, hash)
+		// Mock's HeadEntry returns sha256(body) when no explicit ETag
+		// is pinned — mirror that on the SQLite side so HEAD agrees
+		// with the stored s3_etag.
+		sum := sha256.Sum256([]byte(body))
+		etag := hex.EncodeToString(sum[:])
+		reader.put(key, []byte(body))
+		setEtag(t, db, id, etag)
+	}
+
+	d, err := New(db, reader, rec, 0)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rep, err := d.Check(context.Background())
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if !rep.Clean() {
+		t.Fatalf("expected clean, got %+v", rep)
+	}
+	if reader.headCalls != total {
+		t.Fatalf("headCalls: got %d want %d (HEAD per row)", reader.headCalls, total)
+	}
+	if reader.getCalls != 0 {
+		t.Fatalf("getCalls: got %d want 0 (HEAD-only happy path; #53 is broken)", reader.getCalls)
+	}
+}
+
+// TestCheck_HeadETagMismatch_FallsBackToGET pins HEAD to return an
+// ETag that does NOT match the row's stored s3_etag. The detector must
+// fall back to GET-and-rehash, and (since we ALSO inject a tampered
+// body) report a hash mismatch finding via the canonical GET path —
+// not a cryptic ETag-level finding. This is the integrity-critical
+// path: a sophisticated attacker who could rewrite the object would
+// also rewrite the ETag; the body hash chain is the authoritative
+// source of truth.
+func TestCheck_HeadETagMismatch_FallsBackToGET(t *testing.T) {
+	db := newTestDB(t)
+	reader := newMockReader()
+	rec := &recordingAlerter{}
+
+	ts := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	id, hash, _ := insertRow(t, db, "fixture-mm", ts, `{"row":1}`)
+	// Append-time we recorded etag="aaa"; HEAD now says "bbb" (something
+	// changed in S3). The body we stage also doesn't hash to `hash`, so
+	// GET-and-rehash will fire the AlertKindMismatch finding.
+	key := defaultKey("fixture-mm", ts, hash)
+	reader.putWithEtag(key, []byte(`{"row":1,"injected":"evil"}`), "bbb")
+	setEtag(t, db, id, "aaa")
+
+	d, err := New(db, reader, rec, 0)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rep, err := d.Check(context.Background())
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if rep.HashMismatches != 1 {
+		t.Fatalf("HashMismatches: got %d want 1", rep.HashMismatches)
+	}
+	if reader.headCalls != 1 {
+		t.Fatalf("headCalls: got %d want 1", reader.headCalls)
+	}
+	if reader.getCalls != 1 {
+		t.Fatalf("getCalls: got %d want 1 (mismatch must fall back to GET)", reader.getCalls)
+	}
+	if len(rep.Findings) != 1 || rep.Findings[0].RowID != id || rep.Findings[0].Kind != AlertKindMismatch {
+		t.Fatalf("Findings: got %+v", rep.Findings)
+	}
+}
+
+// TestCheck_LegacyRowNullETag_FallsBackToGET covers the legacy / pre-#53
+// row whose audit_log.s3_etag IS NULL. The detector must skip HEAD
+// entirely (since there's nothing to compare against) and take the
+// original GET-and-rehash code path. Behaviour is unchanged from PR #51
+// for any row written before #53 lands.
+func TestCheck_LegacyRowNullETag_FallsBackToGET(t *testing.T) {
+	db := newTestDB(t)
+	reader := newMockReader()
+	rec := &recordingAlerter{}
+
+	ts := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	_, hash, body := insertRow(t, db, "fixture-legacy", ts, `{"row":1}`)
+	reader.put(defaultKey("fixture-legacy", ts, hash), []byte(body))
+	// Deliberately do NOT call setEtag — the row keeps s3_etag NULL.
+
+	d, err := New(db, reader, rec, 0)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rep, err := d.Check(context.Background())
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if !rep.Clean() {
+		t.Fatalf("expected clean, got %+v", rep)
+	}
+	if reader.headCalls != 0 {
+		t.Fatalf("headCalls: got %d want 0 (legacy NULL must skip HEAD)", reader.headCalls)
+	}
+	if reader.getCalls != 1 {
+		t.Fatalf("getCalls: got %d want 1 (legacy NULL must take GET path)", reader.getCalls)
+	}
+}
+
+// TestCheck_HeadError_FallsBackToGET covers the defensive fallback: a
+// transient HEAD failure (S3 503, etc.) must NOT fail the row closed —
+// the GET path runs and either confirms integrity or surfaces the
+// authoritative finding.
+func TestCheck_HeadError_FallsBackToGET(t *testing.T) {
+	db := newTestDB(t)
+	reader := newMockReader()
+	reader.headForceErr = errors.New("simulated head 503")
+	rec := &recordingAlerter{}
+
+	ts := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	id, hash, body := insertRow(t, db, "fixture-headerr", ts, `{"row":1}`)
+	reader.put(defaultKey("fixture-headerr", ts, hash), []byte(body))
+	setEtag(t, db, id, "some-etag")
+
+	d, err := New(db, reader, rec, 0)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rep, err := d.Check(context.Background())
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if !rep.Clean() {
+		t.Fatalf("expected clean (HEAD-error → GET-and-rehash succeeds), got %+v", rep)
+	}
+	if reader.headCalls != 1 || reader.getCalls != 1 {
+		t.Fatalf("expected exactly one HEAD then one GET; got head=%d get=%d",
+			reader.headCalls, reader.getCalls)
+	}
+}
+
+// TestCheck_HeadMissing_FiresMissingFinding asserts that a HEAD 404
+// short-circuits to the same AlertKindMissing finding the GET 404
+// path produces — no wasted body fetch on objects we already know
+// are gone.
+func TestCheck_HeadMissing_FiresMissingFinding(t *testing.T) {
+	db := newTestDB(t)
+	reader := newMockReader()
+	rec := &recordingAlerter{}
+
+	ts := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	id, _, _ := insertRow(t, db, "fixture-headmiss", ts, `{"row":1}`)
+	setEtag(t, db, id, "some-etag")
+	// Body is NOT staged → mockReader.HeadEntry returns (_, false, nil).
+
+	d, err := New(db, reader, rec, 0)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rep, err := d.Check(context.Background())
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if rep.MissingObjects != 1 {
+		t.Fatalf("MissingObjects: got %d want 1", rep.MissingObjects)
+	}
+	if reader.headCalls != 1 {
+		t.Fatalf("headCalls: got %d want 1", reader.headCalls)
+	}
+	if reader.getCalls != 0 {
+		t.Fatalf("getCalls: got %d want 0 (HEAD 404 must not fall through to GET)", reader.getCalls)
+	}
+	if len(rep.Findings) != 1 || rep.Findings[0].Kind != AlertKindMissing {
+		t.Fatalf("Findings: got %+v", rep.Findings)
+	}
+}
+
 // ---------------------------------------------------------------------
 // PR #54 — batched per-pass alerter fan-out.
 //
@@ -795,9 +1059,7 @@ func TestCheck_256Findings_OneAlert(t *testing.T) {
 	if ev.Kind != AlertKindSummary {
 		t.Fatalf("alert kind: got %q want %q", ev.Kind, AlertKindSummary)
 	}
-	// Per-kind breakdown must be present and accurate. Counters are
-	// independent of the Findings cap (the cap drops Finding entries,
-	// not counter increments — preserved invariant from earlier PRs).
+	// Per-kind breakdown must be present and accurate.
 	if got, _ := ev.Payload["missing_objects"].(int); got != MaxFindings {
 		t.Fatalf("payload.missing_objects: got %d want %d", got, MaxFindings)
 	}
@@ -810,15 +1072,12 @@ func TestCheck_256Findings_OneAlert(t *testing.T) {
 	if got, _ := ev.Payload["read_errors"].(int); got != 0 {
 		t.Fatalf("payload.read_errors: got %d want 0", got)
 	}
-	// total_findings reflects len(Findings), which is capped at MaxFindings.
 	if got, _ := ev.Payload["total_findings"].(int); got != MaxFindings {
 		t.Fatalf("payload.total_findings: got %d want %d", got, MaxFindings)
 	}
-	// Source label is present so operators can route the pager rule.
 	if got, _ := ev.Payload["source"].(string); got == "" {
 		t.Fatal("payload.source: empty; want a non-empty source label")
 	}
-	// run_id is present and looks like an RFC3339Nano timestamp.
 	runID, _ := ev.Payload["run_id"].(string)
 	if runID == "" {
 		t.Fatal("payload.run_id: empty")
@@ -879,10 +1138,6 @@ func TestCheck_AlertPayloadIncludesFirst50RowIDs(t *testing.T) {
 	if note == "" {
 		t.Fatal("payload.truncation_note: empty; want a human-readable note")
 	}
-	// Note must mention both the sample cap and the true total so the
-	// on-call knows what's hidden. total_findings is capped at
-	// MaxFindings (256) but our dataset is 100, so all 100 are
-	// reflected in the counters and the note's "of N" should be 100.
 	if !strings.Contains(note, fmt.Sprintf("first %d", MaxSampleRowIDs)) ||
 		!strings.Contains(note, fmt.Sprintf("of %d", total)) {
 		t.Fatalf("payload.truncation_note: missing expected fragments: %q", note)

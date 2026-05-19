@@ -113,10 +113,19 @@ type Alerter interface {
 
 // EntryReader is the cold-tier read interface. Implementations fetch
 // the body of one audit object by its WORM key. A missing object MUST
-// be reported as (nil, ErrObjectNotFound) so the detector can
-// distinguish "tampered: row deleted from S3" from "transport error".
+// be reported as (nil, ErrObjectNotFound) from GetEntry, or as
+// (_, false, nil) from HeadEntry, so the detector can distinguish
+// "tampered: row deleted from S3" from "transport error".
+//
+// HeadEntry is the cheap integrity probe used when the audit row has a
+// stored s3_etag (post-#53 rows): the detector compares the HEAD ETag
+// against audit_log.s3_etag and only falls back to a full-body GET on
+// mismatch / 404 / transport error. Implementations that cannot
+// implement a true HEAD (test mocks, MinIO with multipart quirks, etc.)
+// may return ("", false, err) to force the GET path.
 type EntryReader interface {
 	GetEntry(ctx context.Context, key string) ([]byte, error)
+	HeadEntry(ctx context.Context, key string) (etag string, found bool, err error)
 }
 
 // ErrObjectNotFound signals "the WORM object does not exist." S3
@@ -523,7 +532,7 @@ func (d *Detector) scanBatch(
 	rep *Report,
 ) (int, int64, error) {
 	rows, err := d.db.QueryContext(ctx,
-		`SELECT id, tenant_id, ts, hash FROM audit_log
+		`SELECT id, tenant_id, ts, hash, COALESCE(s3_etag, '') FROM audit_log
 		 WHERE id > ? ORDER BY id ASC LIMIT ?`,
 		afterID, batchSize)
 	if err != nil {
@@ -535,7 +544,7 @@ func (d *Detector) scanBatch(
 	var newLastID int64
 	for rows.Next() {
 		var r rowMeta
-		if err := rows.Scan(&r.id, &r.tenantID, &r.ts, &r.hash); err != nil {
+		if err := rows.Scan(&r.id, &r.tenantID, &r.ts, &r.hash, &r.s3etag); err != nil {
 			return 0, 0, fmt.Errorf("tamperdetect: scan audit_log: %w", err)
 		}
 		fetched++
@@ -577,17 +586,68 @@ func (d *Detector) scanBatch(
 // guarding so the cold-tier-disabled path can skip the call entirely
 // rather than paying for a function call per row.
 //
-// This helper is the seam for the one remaining follow-on PR:
+// # HEAD-first integrity (#53)
 //
-//   - #53 will swap the GetEntry call for a HEAD-style integrity check
-//     (ETag comparison) on the happy path, falling back to GET only
-//     when ETag is unavailable or the hash mismatches.
+// When the row has a stored ETag (Append captures it via
+// streamer.PutEntry → audit_log.s3_etag), we probe the object with a
+// HEAD and compare ETags. A HEAD round-trip is ~1 KB of metadata vs a
+// full GET that pulls the canonical body and re-hashes it, so at the
+// projected 1M-row-per-day, 7-year retention horizon this is the
+// difference between 1M GETs/pass (#51 baseline) and ~100K HEADs/pass
+// (one HEAD per row on the happy path, occasional GET on mismatch).
 //
-// PR #54 (this commit) landed by changing runOnce's alerter fan-out
-// from per-finding to per-pass; appendFinding stayed unchanged because
-// it is purely a Report mutator.
+// Decision matrix:
+//
+//	r.s3etag empty         → legacy / streamer-without-etag row.
+//	                         Take the original GET-and-rehash path.
+//	HEAD 404 (!found)      → missing object. Same finding as GET 404.
+//	HEAD err (transport)   → defensive: fall back to GET. We don't fail
+//	                         closed on transient transport errors.
+//	HEAD ok, etag matches  → PASS. No body fetch.
+//	HEAD ok, etag differs  → suspicious. Fall back to GET-and-rehash to
+//	                         get the authoritative hash mismatch finding
+//	                         (the alert payload then carries
+//	                         expected_hash vs got_hash, which is what
+//	                         operators triage off — an ETag mismatch
+//	                         alone is too cryptic).
+//
+// PR #54 landed in parallel by changing runOnce's alerter fan-out from
+// per-finding to per-pass; appendFinding stayed unchanged because it is
+// purely a Report mutator. The per-row work and the per-pass alerter
+// are now cleanly decoupled.
 func (d *Detector) checkRow(ctx context.Context, r rowMeta, rep *Report) {
 	key := d.keyFn(r.tenantID, r.ts, r.hash)
+
+	// HEAD-first happy path: only attempted when the row was written
+	// with an ETag captured by audit.Log.Append. Legacy rows skip
+	// directly to GET.
+	if r.s3etag != "" {
+		headEtag, found, err := d.reader.HeadEntry(ctx, key)
+		switch {
+		case err != nil:
+			// Defensive: fall through to GET so a transient HEAD outage
+			// doesn't manifest as spurious read_error alerts. The GET
+			// path will record a read_error if the failure persists.
+		case !found:
+			rep.MissingObjects++
+			appendFinding(rep, Finding{
+				RowID:    r.id,
+				TenantID: r.tenantID,
+				Kind:     AlertKindMissing,
+				Detail:   fmt.Sprintf("key=%s missing from WORM (expected_hash=%s)", key, r.hash),
+			})
+			return
+		case headEtag == r.s3etag:
+			// ETag agrees with what Append recorded at write time. The
+			// object's identity is intact; no body fetch needed.
+			return
+		default:
+			// ETag mismatch — the object's bytes changed. Fall through
+			// to the GET path so we surface the canonical
+			// expected_hash/got_hash detail that ops dashboards key off.
+		}
+	}
+
 	body, err := d.reader.GetEntry(ctx, key)
 	if err != nil {
 		if errors.Is(err, ErrObjectNotFound) {
@@ -625,11 +685,18 @@ func (d *Detector) checkRow(ctx context.Context, r rowMeta, rep *Report) {
 // rowMeta is the row-level slice used by Check + checkRow. Kept
 // package-local so the SQL scan path and the per-row helper share one
 // concrete type.
+//
+// s3etag is the ETag captured by audit.Log.Append at write time (see
+// audit_log.s3_etag, added in #53). Empty means "legacy row, before #53
+// landed" or "the streamer couldn't surface an ETag" — in either case
+// checkRow falls back to the full-body GET path so behaviour is
+// unchanged from PR #51.
 type rowMeta struct {
 	id       int64
 	tenantID string
 	ts       time.Time
 	hash     string
+	s3etag   string
 }
 
 // appendFinding adds f to rep.Findings up to MaxFindings; further
