@@ -36,6 +36,19 @@
 // the id sequence dense is documented on audit.Log.Append; see that
 // godoc before adding any new caller that touches the audit log from
 // inside a transaction.
+//
+// # Memory: bounded streaming scan
+//
+// Check pages through audit_log in batches of DefaultBatchSize rows
+// (1000) using keyset pagination (WHERE id > ? ORDER BY id ASC LIMIT ?).
+// Each batch is processed end-to-end (per-row S3 verification + gap
+// detection) before the next is fetched, so the row-buffer footprint is
+// O(batch_size) regardless of how big the audit_log gets. At 7-year
+// retention horizons this is the difference between ~150 KB resident
+// and ~150 MB resident.
+//
+// Tests can override the batch size via WithBatchSize for deterministic
+// multi-page coverage on small synthetic datasets.
 package tamperdetect
 
 import (
@@ -129,6 +142,12 @@ type Report struct {
 // when truncation happens.
 const MaxFindings = 256
 
+// DefaultBatchSize is the number of audit_log rows the streaming scan
+// fetches per SQLite page. Picked to keep the row-buffer footprint
+// well under 1 MB even with verbose tenant_ids while still amortising
+// the SQL round-trip overhead. Override with WithBatchSize for tests.
+const DefaultBatchSize = 1000
+
 // Finding is one mismatched row.
 type Finding struct {
 	// RowID is the audit_log.id for the offending row. For rowid-gap
@@ -160,11 +179,12 @@ func (r *Report) Clean() bool {
 // Detector is the daily tamper-detection cron. Construct with New, then
 // start with Run(ctx). Run blocks until ctx is cancelled.
 type Detector struct {
-	db       *sql.DB
-	reader   EntryReader // nil → continuity-only mode
-	alerter  Alerter
-	interval time.Duration
-	source   string
+	db        *sql.DB
+	reader    EntryReader // nil → continuity-only mode
+	alerter   Alerter
+	interval  time.Duration
+	source    string
+	batchSize int
 
 	// keyFn maps an entry's identifying fields to its WORM key. The
 	// default mirrors audit.wormKey; injecting a custom one lets tests
@@ -193,6 +213,18 @@ func WithSource(s string) Option {
 	return func(d *Detector) { d.source = s }
 }
 
+// WithBatchSize overrides the streaming-scan page size. Values ≤ 0 are
+// ignored and the default (DefaultBatchSize) is kept. Tests use small
+// values to exercise the multi-page code path on tiny synthetic
+// datasets; production keeps the default.
+func WithBatchSize(n int) Option {
+	return func(d *Detector) {
+		if n > 0 {
+			d.batchSize = n
+		}
+	}
+}
+
 // New builds a Detector. db is required. reader may be nil — when nil
 // the detector runs in continuity-only mode (no S3 GETs). alerter is
 // required; pass a no-op implementation for tests if you don't care
@@ -206,12 +238,13 @@ func New(db *sql.DB, reader EntryReader, alerter Alerter, interval time.Duration
 		return nil, errors.New("tamperdetect: nil alerter")
 	}
 	d := &Detector{
-		db:       db,
-		reader:   reader,
-		alerter:  alerter,
-		interval: interval,
-		source:   "owera-agentic-api",
-		keyFn:    defaultKey,
+		db:        db,
+		reader:    reader,
+		alerter:   alerter,
+		interval:  interval,
+		source:    "owera-agentic-api",
+		batchSize: DefaultBatchSize,
+		keyFn:     defaultKey,
 	}
 	for _, o := range opts {
 		o(d)
@@ -305,10 +338,18 @@ func (d *Detector) runOnce(ctx context.Context) {
 	}
 }
 
-// Check performs one tamper-detection pass and returns the report. It
-// never partially-mutates the database. A SQLite-level read error
-// returns (nil, err); per-row anomalies are returned in the report and
-// the run is still considered successful at the cron level.
+// Check performs one tamper-detection pass and returns the report.
+//
+// The scan is streamed: rows are fetched from audit_log in keyset-
+// paginated batches of d.batchSize, and each batch is processed end-
+// to-end (continuity-gap detection + per-row S3 verification) before
+// the next page is requested. The transient row buffer is O(batchSize),
+// not O(total rows), which matters because the WORM retention horizon
+// is seven years.
+//
+// A SQLite-level read error returns (nil, err); per-row anomalies are
+// returned in the report and the run is still considered successful at
+// the cron level.
 func (d *Detector) Check(ctx context.Context) (*Report, error) {
 	rep := &Report{
 		StartedAt:       time.Now().UTC(),
@@ -318,75 +359,162 @@ func (d *Detector) Check(ctx context.Context) (*Report, error) {
 		rep.FinishedAt = time.Now().UTC()
 	}()
 
-	rows, err := d.db.QueryContext(ctx,
-		`SELECT id, tenant_id, ts, hash FROM audit_log ORDER BY id ASC`)
-	if err != nil {
-		return nil, fmt.Errorf("tamperdetect: query audit_log: %w", err)
-	}
-	defer rows.Close()
+	// Streaming state. lastID is the keyset cursor; prevID tracks
+	// continuity across page boundaries (so a gap that straddles two
+	// pages is still detected). firstRow flips to false after the
+	// very first row is seen — until then, prevID's value is moot
+	// and gap detection is skipped (the first row's id can legitimately
+	// be anything ≥ 1).
+	var (
+		lastID   int64
+		prevID   int64
+		firstRow = true
+	)
 
-	var seen []rowMeta
-	for rows.Next() {
-		var r rowMeta
-		if err := rows.Scan(&r.id, &r.tenantID, &r.ts, &r.hash); err != nil {
-			return nil, fmt.Errorf("tamperdetect: scan audit_log: %w", err)
-		}
-		seen = append(seen, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("tamperdetect: iterate audit_log: %w", err)
-	}
-	rep.RowsScanned = len(seen)
-
-	// Continuity check: rowid sequence must be dense from min..max.
-	// We allow the first run-of-empty (table empty) without alerting.
-	d.checkContinuity(seen, rep)
-
-	// Completeness + integrity require the cold tier.
-	if d.reader == nil {
-		return rep, nil
+	batchSize := d.batchSize
+	if batchSize <= 0 {
+		batchSize = DefaultBatchSize
 	}
 
-	for _, r := range seen {
-		key := d.keyFn(r.tenantID, r.ts, r.hash)
-		body, err := d.reader.GetEntry(ctx, key)
+	for {
+		fetched, newLastID, err := d.scanBatch(ctx, lastID, batchSize, &prevID, &firstRow, rep)
 		if err != nil {
-			if errors.Is(err, ErrObjectNotFound) {
-				rep.MissingObjects++
-				appendFinding(rep, Finding{
-					RowID:    r.id,
-					TenantID: r.tenantID,
-					Kind:     AlertKindMissing,
-					Detail:   fmt.Sprintf("key=%s missing from WORM (expected_hash=%s)", key, r.hash),
-				})
-				continue
-			}
-			rep.ReadErrors++
-			appendFinding(rep, Finding{
-				RowID:    r.id,
-				TenantID: r.tenantID,
-				Kind:     AlertKindReadError,
-				Detail:   fmt.Sprintf("key=%s read_err=%v", key, err),
-			})
-			continue
+			return nil, err
 		}
-		sum := sha256.Sum256(body)
-		got := hex.EncodeToString(sum[:])
-		if got != r.hash {
-			rep.HashMismatches++
-			appendFinding(rep, Finding{
-				RowID:    r.id,
-				TenantID: r.tenantID,
-				Kind:     AlertKindMismatch,
-				Detail:   fmt.Sprintf("key=%s expected_hash=%s got=%s", key, r.hash, got),
-			})
+		if fetched == 0 {
+			break
+		}
+		lastID = newLastID
+		if fetched < batchSize {
+			// Short page → no more rows. Skip the next zero-row
+			// round-trip.
+			break
 		}
 	}
 	return rep, nil
 }
 
-// rowMeta is the row-level slice used by Check + checkContinuity. Kept
-// package-local so the SQL scan path and the gap detector share one
+// scanBatch fetches one keyset page of audit_log rows (id > afterID,
+// ORDER BY id ASC, LIMIT batchSize) and processes each row inline:
+// continuity-gap detection runs against *prevID, and (if cold-tier is
+// enabled) per-row S3 verification runs via checkRow. Returns the
+// number of rows fetched on this page and the largest id seen (the
+// next page's cursor).
+//
+// Splitting this out of Check keeps the per-row work concentrated in
+// checkRow — future PRs that change S3 access (GET→HEAD) or alerter
+// fan-out (per-finding → per-pass) can do so without touching the
+// pagination loop.
+func (d *Detector) scanBatch(
+	ctx context.Context,
+	afterID int64,
+	batchSize int,
+	prevID *int64,
+	firstRow *bool,
+	rep *Report,
+) (int, int64, error) {
+	rows, err := d.db.QueryContext(ctx,
+		`SELECT id, tenant_id, ts, hash FROM audit_log
+		 WHERE id > ? ORDER BY id ASC LIMIT ?`,
+		afterID, batchSize)
+	if err != nil {
+		return 0, 0, fmt.Errorf("tamperdetect: query audit_log: %w", err)
+	}
+	defer rows.Close()
+
+	fetched := 0
+	var newLastID int64
+	for rows.Next() {
+		var r rowMeta
+		if err := rows.Scan(&r.id, &r.tenantID, &r.ts, &r.hash); err != nil {
+			return 0, 0, fmt.Errorf("tamperdetect: scan audit_log: %w", err)
+		}
+		fetched++
+		rep.RowsScanned++
+		newLastID = r.id
+
+		// Continuity sweep — runs across page boundaries via the
+		// shared prevID pointer. The first row in the entire run
+		// is exempt (any starting id is legal); subsequent rows
+		// must be exactly prev+1.
+		if *firstRow {
+			*firstRow = false
+		} else if r.id != *prevID+1 {
+			rep.RowidGaps++
+			appendFinding(rep, Finding{
+				RowID:  *prevID + 1,
+				Kind:   AlertKindRowidGap,
+				Detail: fmt.Sprintf("rowid gap: expected %d, next present is %d", *prevID+1, r.id),
+			})
+		}
+		*prevID = r.id
+
+		// Cold-tier completeness + integrity. checkRow centralises
+		// the per-row S3 work so #53 (GET→HEAD) can swap the read
+		// strategy without touching the pagination loop.
+		if d.reader != nil {
+			d.checkRow(ctx, r, rep)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, fmt.Errorf("tamperdetect: iterate audit_log: %w", err)
+	}
+	return fetched, newLastID, nil
+}
+
+// checkRow runs the per-row WORM completeness + integrity checks for
+// one audit_log row and appends any finding(s) to rep. Callers must
+// have already established d.reader != nil — checkRow does no nil-
+// guarding so the cold-tier-disabled path can skip the call entirely
+// rather than paying for a function call per row.
+//
+// This helper is the seam for the two follow-on PRs:
+//
+//   - #53 will swap the GetEntry call for a HEAD-style integrity check
+//     (ETag comparison) on the happy path, falling back to GET only
+//     when ETag is unavailable or the hash mismatches.
+//   - #54 will change the alerter fan-out from per-finding to per-pass,
+//     which only touches runOnce — but keeping the per-row append
+//     centralised here (via appendFinding) means #54 doesn't have to
+//     reshape this helper either.
+func (d *Detector) checkRow(ctx context.Context, r rowMeta, rep *Report) {
+	key := d.keyFn(r.tenantID, r.ts, r.hash)
+	body, err := d.reader.GetEntry(ctx, key)
+	if err != nil {
+		if errors.Is(err, ErrObjectNotFound) {
+			rep.MissingObjects++
+			appendFinding(rep, Finding{
+				RowID:    r.id,
+				TenantID: r.tenantID,
+				Kind:     AlertKindMissing,
+				Detail:   fmt.Sprintf("key=%s missing from WORM (expected_hash=%s)", key, r.hash),
+			})
+			return
+		}
+		rep.ReadErrors++
+		appendFinding(rep, Finding{
+			RowID:    r.id,
+			TenantID: r.tenantID,
+			Kind:     AlertKindReadError,
+			Detail:   fmt.Sprintf("key=%s read_err=%v", key, err),
+		})
+		return
+	}
+	sum := sha256.Sum256(body)
+	got := hex.EncodeToString(sum[:])
+	if got != r.hash {
+		rep.HashMismatches++
+		appendFinding(rep, Finding{
+			RowID:    r.id,
+			TenantID: r.tenantID,
+			Kind:     AlertKindMismatch,
+			Detail:   fmt.Sprintf("key=%s expected_hash=%s got=%s", key, r.hash, got),
+		})
+	}
+}
+
+// rowMeta is the row-level slice used by Check + checkRow. Kept
+// package-local so the SQL scan path and the per-row helper share one
 // concrete type.
 type rowMeta struct {
 	id       int64
@@ -395,31 +523,14 @@ type rowMeta struct {
 	hash     string
 }
 
-// checkContinuity inspects the id list for gaps. The caller passes seen
-// already sorted ASC by id (the SQL ORDER BY guarantees this), so we
-// only need a linear sweep.
-func (d *Detector) checkContinuity(seen []rowMeta, rep *Report) {
-	if len(seen) == 0 {
-		return
-	}
-	prev := seen[0].id
-	for i := 1; i < len(seen); i++ {
-		cur := seen[i].id
-		if cur != prev+1 {
-			rep.RowidGaps++
-			appendFinding(rep, Finding{
-				RowID:  prev + 1,
-				Kind:   AlertKindRowidGap,
-				Detail: fmt.Sprintf("rowid gap: expected %d, next present is %d", prev+1, cur),
-			})
-		}
-		prev = cur
-	}
-}
-
 // appendFinding adds f to rep.Findings up to MaxFindings; further
 // findings are dropped silently (the counters remain accurate so the
 // boot-log + alert fan-out still reflects the true severity).
+//
+// This is the single append site for Report.Findings. PR #54 will
+// intercept here to change per-finding alerter fan-out into a per-pass
+// batched alert, so any new code path that wants to record a finding
+// MUST go through this helper.
 func appendFinding(rep *Report, f Finding) {
 	if len(rep.Findings) >= MaxFindings {
 		return
