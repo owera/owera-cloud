@@ -8,10 +8,15 @@
 // rejected the operation).
 //
 // The detector runs in-process inside the apiserver as a 24h ticker
-// (see cmd/apiserver/main.go). It is intentionally read-only: every
-// finding fans out through the existing alerting Router (severity
-// Critical). It never tries to "repair" — that is an operator decision
-// because a repair could mask a real attack.
+// (see cmd/apiserver/main.go). It is intentionally read-only: each
+// non-clean pass fans out exactly ONE summary alert through the
+// existing alerting Router (severity Critical) — see runOnce. The
+// summary payload carries per-kind counters plus the first
+// MaxSampleRowIDs affected rowids, which is enough for an on-call to
+// triage a real tamper event without the alerter producing a 256-page
+// pager storm (the worst case before PR #54 — one per Finding up to
+// MaxFindings). The detector never tries to "repair" — that is an
+// operator decision because a repair could mask a real attack.
 //
 // The three checks:
 //
@@ -66,12 +71,38 @@ import (
 // are stable; operators wire dashboards + PagerDuty event rules off
 // them. Adding a new alert kind is fine; renaming an existing one
 // requires a coordinated PagerDuty service-rule update.
+//
+// AlertKindSummary is the single per-pass alert kind. PR #54 collapsed
+// every alerter invocation (per-finding fan-out + scan-level failure)
+// into ONE Alert call per pass keyed by this constant; this is the
+// detector's only kind that appears in the alerter wire stream now.
+//
+// AlertKindMissing / AlertKindMismatch / AlertKindRowidGap /
+// AlertKindReadError remain in use as Finding.Kind values inside the
+// summary payload's findings list, so dashboards keyed on the original
+// per-row kinds still pivot correctly — they are just never the
+// outer-level alert kind any more. The scan-level "SQLite query
+// failed" path also folds into AlertKindSummary with an extra
+// scan_error field; see runOnce.
 const (
 	AlertKindMissing   = "audit.tamper.missing_object"
 	AlertKindMismatch  = "audit.tamper.hash_mismatch"
 	AlertKindRowidGap  = "audit.tamper.rowid_gap"
 	AlertKindReadError = "audit.tamper.read_error"
+	AlertKindSummary   = "audit.tamper.summary"
 )
+
+// MaxSampleRowIDs caps the number of affected RowIDs enumerated in a
+// summary alert payload. When a pass produces more findings than this,
+// the payload includes the first MaxSampleRowIDs (in Findings order,
+// which is rowid-ascending by construction of the streaming scan) and
+// a "more findings truncated — see audit log for full list" note.
+//
+// 50 is enough for an on-call to triage the pattern (contiguous range?
+// scattered? all one tenant?) without bloating the PagerDuty payload
+// past the 1024-char custom_details soft limit when Labels are
+// serialised as strings.
+const MaxSampleRowIDs = 50
 
 // Alerter mirrors billing.Alerter so the apiserver can hand the same
 // multiAlerter to both subsystems. We do not import billing because the
@@ -303,39 +334,117 @@ func (d *Detector) Run(ctx context.Context) {
 }
 
 // runOnce wraps Check with the boot-log + alerting fan-out so Run
-// stays focused on scheduling. Errors from Check itself (the SQLite
-// query failed, etc.) are alerted as audit.tamper.read_error; non-
-// clean reports fan their findings out per-row.
+// stays focused on scheduling.
+//
+// Alerter invocation contract (G5 release-gate, PR #54):
+//
+//   - Clean report → zero alerter calls.
+//   - Non-clean report → exactly ONE AlertKindSummary call per pass,
+//     carrying the per-kind breakdown + a sample of affected rowids.
+//     Pre-#54 this was up to MaxFindings (256) calls per pass — one
+//     per Finding — which would have paged 256 times for a single
+//     tamper event once PAGERDUTY_ROUTING_KEY is wired.
+//   - Scan-level failure (Check itself returned an error: SQLite
+//     query failed, etc.) → exactly ONE AlertKindSummary call carrying
+//     a synthetic 1-read-error report. Folding scan-level errors into
+//     the same summary kind keeps the operator dashboards single-
+//     keyed; the payload's scan_error field disambiguates from per-
+//     row read errors.
+//
+// Errors from Check are NOT propagated; the loop must keep ticking.
+//
+// Implementation note: there is exactly ONE d.alerter.Alert call in
+// this function (deliberate — eyeball-test invariant for the
+// per-pass fan-out contract). The three branches above compute either
+// a payload or a nil sentinel; the single call site at the bottom
+// fires when payload != nil.
 func (d *Detector) runOnce(ctx context.Context) {
+	var payload map[string]any
+
 	rep, err := d.Check(ctx)
-	if err != nil {
-		// A Check-level error means we couldn't even iterate the
-		// audit_log — alert and bail. We do NOT propagate; the loop
-		// must keep ticking.
-		_ = d.alerter.Alert(ctx, AlertKindReadError, map[string]any{
-			"error":  err.Error(),
-			"source": d.source,
-		})
-		return
-	}
-	if rep == nil {
-		return
-	}
-	if rep.Clean() {
+	switch {
+	case err != nil:
+		// Scan-level failure: synthesise a summary-shaped payload so
+		// the detector has exactly one alert site.
+		now := time.Now().UTC()
+		payload = summaryPayload(&Report{
+			StartedAt:  now,
+			FinishedAt: now,
+			ReadErrors: 1,
+		}, d.source)
+		payload["scan_error"] = err.Error()
+	case rep == nil:
+		// Defensive: Check returned (nil, nil). Treat as clean — no
+		// alert.
+	case rep.Clean():
 		d.mu.Lock()
 		d.lastClean = rep.FinishedAt
 		d.mu.Unlock()
-		return
+	default:
+		payload = summaryPayload(rep, d.source)
 	}
-	for _, f := range rep.Findings {
-		payload := map[string]any{
-			"row_id":    f.RowID,
-			"tenant_id": f.TenantID,
-			"detail":    f.Detail,
-			"source":    d.source,
-		}
-		_ = d.alerter.Alert(ctx, f.Kind, payload)
+
+	if payload != nil {
+		_ = d.alerter.Alert(ctx, AlertKindSummary, payload)
 	}
+}
+
+// summaryPayload renders one Report into the per-pass alerter payload.
+// Pulled out of runOnce so tests can assert the payload shape without
+// going through the recordingAlerter glue.
+//
+// Payload shape (stable; operators key dashboards off these keys):
+//
+//	run_id:           Report.StartedAt RFC3339Nano — deterministic per
+//	                  pass; if a pass is replayed (shouldn't happen),
+//	                  same id → same incident under PagerDuty dedup.
+//	started_at:       Report.StartedAt RFC3339Nano
+//	finished_at:      Report.FinishedAt RFC3339Nano
+//	source:           Detector.source (e.g. "owera-agentic-api")
+//	rows_scanned:     Report.RowsScanned
+//	total_findings:   len(Report.Findings) — capped at MaxFindings
+//	missing_objects:  Report.MissingObjects
+//	hash_mismatches:  Report.HashMismatches
+//	rowid_gaps:       Report.RowidGaps
+//	read_errors:      Report.ReadErrors
+//	cold_tier_enabled: Report.ColdTierEnabled
+//	sample_row_ids:   []int64 of the first MaxSampleRowIDs rowids from
+//	                  Findings (deterministic, scan-order)
+//	sample_truncated: true when total_findings > MaxSampleRowIDs
+//	truncation_note:  human-readable string, present only when truncated
+func summaryPayload(rep *Report, source string) map[string]any {
+	total := len(rep.Findings)
+
+	sampleLen := total
+	if sampleLen > MaxSampleRowIDs {
+		sampleLen = MaxSampleRowIDs
+	}
+	sample := make([]int64, sampleLen)
+	for i := 0; i < sampleLen; i++ {
+		sample[i] = rep.Findings[i].RowID
+	}
+
+	payload := map[string]any{
+		"run_id":            rep.StartedAt.Format(time.RFC3339Nano),
+		"started_at":        rep.StartedAt.Format(time.RFC3339Nano),
+		"finished_at":       rep.FinishedAt.Format(time.RFC3339Nano),
+		"source":            source,
+		"rows_scanned":      rep.RowsScanned,
+		"total_findings":    total,
+		"missing_objects":   rep.MissingObjects,
+		"hash_mismatches":   rep.HashMismatches,
+		"rowid_gaps":        rep.RowidGaps,
+		"read_errors":       rep.ReadErrors,
+		"cold_tier_enabled": rep.ColdTierEnabled,
+		"sample_row_ids":    sample,
+		"sample_truncated":  total > MaxSampleRowIDs,
+	}
+	if total > MaxSampleRowIDs {
+		payload["truncation_note"] = fmt.Sprintf(
+			"more findings truncated — see audit log for full list (showing first %d of %d)",
+			MaxSampleRowIDs, total)
+	}
+	return payload
 }
 
 // Check performs one tamper-detection pass and returns the report.
@@ -468,15 +577,15 @@ func (d *Detector) scanBatch(
 // guarding so the cold-tier-disabled path can skip the call entirely
 // rather than paying for a function call per row.
 //
-// This helper is the seam for the two follow-on PRs:
+// This helper is the seam for the one remaining follow-on PR:
 //
 //   - #53 will swap the GetEntry call for a HEAD-style integrity check
 //     (ETag comparison) on the happy path, falling back to GET only
 //     when ETag is unavailable or the hash mismatches.
-//   - #54 will change the alerter fan-out from per-finding to per-pass,
-//     which only touches runOnce — but keeping the per-row append
-//     centralised here (via appendFinding) means #54 doesn't have to
-//     reshape this helper either.
+//
+// PR #54 (this commit) landed by changing runOnce's alerter fan-out
+// from per-finding to per-pass; appendFinding stayed unchanged because
+// it is purely a Report mutator.
 func (d *Detector) checkRow(ctx context.Context, r rowMeta, rep *Report) {
 	key := d.keyFn(r.tenantID, r.ts, r.hash)
 	body, err := d.reader.GetEntry(ctx, key)
@@ -527,10 +636,11 @@ type rowMeta struct {
 // findings are dropped silently (the counters remain accurate so the
 // boot-log + alert fan-out still reflects the true severity).
 //
-// This is the single append site for Report.Findings. PR #54 will
-// intercept here to change per-finding alerter fan-out into a per-pass
-// batched alert, so any new code path that wants to record a finding
-// MUST go through this helper.
+// This is the single append site for Report.Findings. PR #54 batched
+// the alerter fan-out into one per-pass summary (see runOnce), so this
+// helper is a pure Report mutator — no alerter side effects. Any new
+// code path that wants to record a finding MUST still go through this
+// helper so the MaxFindings cap is honoured uniformly.
 func appendFinding(rep *Report, f Finding) {
 	if len(rep.Findings) >= MaxFindings {
 		return
