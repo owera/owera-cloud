@@ -30,7 +30,9 @@ export interface ComplexitySliderProps {
 }
 
 /**
- * Discrete 5-stop complexity slider. The hero control of /compose.
+ * The hero control of /compose. Treated as a precision instrument, not a
+ * generic Radix slider — vernier-tick rail, index labels per stop, variable
+ * font-weight transitions on the active label, soft aura on the thumb.
  *
  * Keyboard: arrows step, Home/End jump, 1–5 jump to stop.
  * A11y: aria-valuetext reports the human stop label.
@@ -70,12 +72,57 @@ export function ComplexitySlider({
     [apply, disabled],
   );
 
+  // Build vernier-style tick marks between the major stops. 12 minor ticks
+  // between each major stop = 48 minor + 5 major = the precision-instrument
+  // feel. Pure decoration — the slider snaps to majors only.
+  const minorTicks = React.useMemo(() => {
+    const ticks: number[] = [];
+    const segments = COMPLEXITY_LEVELS.length - 1;
+    const minorsPerSeg = 12;
+    for (let s = 0; s < segments; s++) {
+      for (let m = 1; m < minorsPerSeg; m++) {
+        ticks.push(((s + m / minorsPerSeg) / segments) * 100);
+      }
+    }
+    return ticks;
+  }, []);
+
   return (
     <div
       className={cn("relative select-none", className)}
       onKeyDown={onKey}
       data-stop={value}
     >
+      {/* Vernier tick rail — sits ABOVE the slider track. Decorative. */}
+      <div
+        className="relative h-3 w-full mb-2 pointer-events-none"
+        aria-hidden
+      >
+        {minorTicks.map((left, i) => (
+          <span
+            key={`m${i}`}
+            className="absolute top-0 w-px h-1.5 bg-[var(--color-stop-tick)]"
+            style={{ left: `${left}%` }}
+          />
+        ))}
+        {COMPLEXITY_LEVELS.map((_, i) => {
+          const left = (i / (COMPLEXITY_LEVELS.length - 1)) * 100;
+          const past = i <= idx;
+          return (
+            <span
+              key={`M${i}`}
+              className={cn(
+                "absolute top-0 w-px h-3 transition-colors duration-200",
+                past
+                  ? "bg-[var(--color-stop-fill)]"
+                  : "bg-[var(--color-stop-tick)]",
+              )}
+              style={{ left: `${left}%` }}
+            />
+          );
+        })}
+      </div>
+
       <RadixSlider.Root
         value={[idx]}
         min={0}
@@ -86,29 +133,16 @@ export function ComplexitySlider({
           const next = vals[0] ?? 0;
           apply(next);
         }}
-        className={cn(
-          "relative flex w-full touch-none items-center",
-          "h-10",
-        )}
+        className="relative flex w-full touch-none items-center h-8"
         aria-label="Complexity level"
       >
-        <RadixSlider.Track
-          className={cn(
-            "relative h-1 w-full grow rounded-full",
-            "bg-[var(--color-stop-track)]",
-          )}
-        >
-          <RadixSlider.Range
-            className={cn(
-              "absolute h-full rounded-full",
-              "bg-[var(--color-stop-fill)]",
-              "transition-[width] duration-150 ease-out",
-            )}
-          />
+        <RadixSlider.Track className="relative h-px w-full grow bg-[var(--color-stop-track)] compose-track-draw">
+          <RadixSlider.Range className="absolute h-full bg-[var(--color-stop-fill)] transition-[width] duration-200 ease-out" />
         </RadixSlider.Track>
 
         {COMPLEXITY_LEVELS.map((level, i) => {
           const isActive = i <= idx;
+          const isCurrent = i === idx;
           const isGated = i >= gateIdx;
           const left = (i / (COMPLEXITY_LEVELS.length - 1)) * 100;
           return (
@@ -120,13 +154,15 @@ export function ComplexitySlider({
               disabled={disabled}
               onClick={() => !disabled && apply(i)}
               className={cn(
-                "absolute -translate-x-1/2 size-3 rounded-full border",
-                "transition-colors duration-150",
-                isActive
-                  ? "bg-[var(--color-stop-tick-active)] border-[var(--color-stop-tick-active)]"
-                  : "bg-[var(--color-stop-track)] border-[var(--color-stop-tick)]",
-                isGated && "ring-1 ring-[var(--color-state-failed)]/40",
-                "hover:scale-110",
+                "absolute -translate-x-1/2 rounded-full",
+                "transition-all duration-200 ease-out",
+                isCurrent
+                  ? "size-2.5 bg-[var(--color-stop-fill)] ring-1 ring-[var(--color-stop-fill)]"
+                  : isActive
+                    ? "size-1.5 bg-[var(--color-stop-fill)]"
+                    : "size-1.5 bg-[var(--color-stop-tick)]",
+                isGated && "ring-1 ring-[var(--color-state-failed)]/50",
+                !disabled && "hover:scale-125",
               )}
               style={{ left: `${left}%` }}
             />
@@ -136,19 +172,32 @@ export function ComplexitySlider({
         <RadixSlider.Thumb
           aria-valuetext={STOP_META[value].label}
           className={cn(
-            "block size-5 rounded-full",
-            "bg-[var(--color-stop-thumb)]",
-            "shadow-[0_0_0_1px_var(--color-border)]",
+            "block size-7 rounded-full bg-[var(--color-stop-thumb)]",
+            "compose-thumb-aura",
             "focus-visible:outline-none",
             "focus-visible:ring-2 focus-visible:ring-[var(--color-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-background)]",
-            "transition-transform duration-150 ease-out",
-            "hover:scale-105",
+            "transition-transform duration-200 ease-out",
+            "hover:scale-105 active:scale-95",
             disabled && "opacity-50 cursor-not-allowed",
           )}
         />
       </RadixSlider.Root>
 
-      <div className="mt-3 grid grid-cols-5 gap-1">
+      {/* Index labels — instrument-panel feel (INST. 01 / 02 / 03…). */}
+      <div className="mt-1 grid grid-cols-5 pointer-events-none">
+        {COMPLEXITY_LEVELS.map((_, i) => (
+          <span
+            key={`idx${i}`}
+            className="readout-label text-center"
+            style={{ fontSize: 9, opacity: i <= idx ? 0.85 : 0.35 }}
+          >
+            {String(i + 1).padStart(2, "0")}
+          </span>
+        ))}
+      </div>
+
+      {/* Stop labels — variable font weight transitions on active. */}
+      <div className="mt-5 grid grid-cols-5 gap-1">
         {COMPLEXITY_LEVELS.map((level, i) => {
           const isActive = i === idx;
           const isPast = i < idx;
@@ -160,30 +209,28 @@ export function ComplexitySlider({
               disabled={disabled}
               onClick={() => !disabled && apply(i)}
               className={cn(
-                "flex flex-col items-center text-center px-1 py-1",
-                "transition-colors rounded",
+                "flex flex-col items-center text-center px-1 py-1 rounded",
+                "transition-colors",
                 "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--color-ring)]",
-                isActive && "bg-[var(--color-muted)]",
               )}
             >
               <span
-                className={cn(
-                  "font-mono text-[10px] uppercase tracking-wide",
-                  isActive
-                    ? "text-[var(--color-stop-label-active)]"
-                    : isPast
-                      ? "text-[var(--color-foreground)]"
-                      : "text-[var(--color-stop-label-muted)]",
-                  isGated && "text-[var(--color-state-failed)]/70",
-                )}
+                className="stop-label text-[10px]"
+                data-active={isActive}
+                data-past={isPast}
+                style={{
+                  color: isGated
+                    ? "rgba(239, 68, 68, 0.7)"
+                    : undefined,
+                }}
               >
                 {STOP_META[level].label}
               </span>
               <span
                 className={cn(
-                  "mt-0.5 text-[10px] leading-tight",
+                  "mt-1 text-[10px] leading-tight font-sans",
                   isActive
-                    ? "text-[var(--color-muted-foreground)]"
+                    ? "text-[var(--color-ink-dim)]"
                     : "text-[var(--color-stop-label-muted)]",
                   "hidden sm:block",
                 )}
@@ -197,4 +244,3 @@ export function ComplexitySlider({
     </div>
   );
 }
-
