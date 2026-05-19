@@ -51,7 +51,7 @@ func TestS3WORMStreamer_HeadersAndBody(t *testing.T) {
 	}
 	canonical := []byte(`{"hash":"deadbeef"}`)
 
-	if err := streamer.PutEntry(context.Background(), entry, canonical); err != nil {
+	if _, err := streamer.PutEntry(context.Background(), entry, canonical); err != nil {
 		t.Fatalf("PutEntry: %v", err)
 	}
 
@@ -98,7 +98,7 @@ func TestS3WORMStreamer_LockedRejection(t *testing.T) {
 		Region:     "us-east-1",
 	}
 	entry := Entry{TenantID: "t", Ts: time.Now().UTC(), Hash: "h"}
-	err := streamer.PutEntry(context.Background(), entry, []byte("x"))
+	_, err := streamer.PutEntry(context.Background(), entry, []byte("x"))
 	if err == nil {
 		t.Fatal("expected error on 403, got nil")
 	}
@@ -146,7 +146,7 @@ func TestSigV4Transport_AddsAuthHeader(t *testing.T) {
 		Region:     "us-east-1",
 	}
 	entry := Entry{TenantID: "t", Ts: time.Now().UTC(), Hash: "h"}
-	if err := streamer.PutEntry(context.Background(), entry, []byte(`{"h":"x"}`)); err != nil {
+	if _, err := streamer.PutEntry(context.Background(), entry, []byte(`{"h":"x"}`)); err != nil {
 		t.Fatalf("PutEntry: %v", err)
 	}
 	if !strings.HasPrefix(gotAuth, "AWS4-HMAC-SHA256 ") {

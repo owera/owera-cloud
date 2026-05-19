@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -55,8 +56,17 @@ type Entry struct {
 // to a write-once medium (e.g. S3 with Object Lock). Failures are
 // returned to the caller; Append degrades to "hot only" but records a
 // streamer_err in stderr — the operator is expected to backfill.
+//
+// PutEntry returns the cold-tier object's ETag (bare hex, no surrounding
+// quotes) so Log.Append can record it in audit_log.s3_etag. The audit/
+// tamperdetect cron uses the stored ETag to verify the WORM object's
+// identity via HEAD instead of a full GET on every pass (1M GETs → ~100K
+// HEADs at the planned 7-year retention horizon). An empty ETag is
+// legal (returned when the streamer cannot capture one, e.g. a backend
+// that does not surface ETags); tamperdetect falls back to the
+// GET-and-rehash path for any row whose s3_etag is NULL or empty.
 type WORMStreamer interface {
-	PutEntry(ctx context.Context, e Entry, canonical []byte) error
+	PutEntry(ctx context.Context, e Entry, canonical []byte) (etag string, err error)
 }
 
 // Log is the audit sink. Storage is SQLite for the scaffold; the
@@ -106,20 +116,39 @@ func (l *Log) migrate() error {
 			hash        TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS audit_tenant_ts_idx ON audit_log(tenant_id, ts DESC)`,
-		// WORM enforcement: reject UPDATE and DELETE at the SQL layer.
-		// An attacker who bypasses these by editing the .db directly
-		// still breaks the hash chain, which Verify() detects.
-		`CREATE TRIGGER IF NOT EXISTS audit_log_no_update
-			BEFORE UPDATE ON audit_log
-			BEGIN SELECT RAISE(ABORT, 'audit_log is append-only (WORM)'); END`,
-		`CREATE TRIGGER IF NOT EXISTS audit_log_no_delete
-			BEFORE DELETE ON audit_log
-			BEGIN SELECT RAISE(ABORT, 'audit_log is append-only (WORM)'); END`,
 	}
 	for _, stmt := range stmts {
 		if _, err := l.db.Exec(stmt); err != nil {
 			return fmt.Errorf("audit: migrate: %w", err)
 		}
+	}
+	// Additive column for tamperdetect (#53). NULL on legacy rows; the
+	// detector falls back to GET+rehash when the column is empty. We do
+	// the ALTER TABLE conditionally by probing PRAGMA table_info so the
+	// migration is run-twice safe (SQLite would otherwise error on a
+	// duplicate column).
+	if err := l.ensureColumnTEXT("audit_log", "s3_etag"); err != nil {
+		return fmt.Errorf("audit: migrate s3_etag: %w", err)
+	}
+	// WORM enforcement: reject UPDATE and DELETE at the SQL layer.
+	// An attacker who bypasses these by editing the .db directly still
+	// breaks the hash chain, which Verify() detects.
+	//
+	// The UPDATE trigger uses BEFORE UPDATE OF <column-list> so it
+	// only fires for the immutable, hash-covered columns. s3_etag is
+	// intentionally excluded: Log.Append writes it via a follow-up
+	// UPDATE after PutEntry returns the cold-tier ETag (no roll-back-
+	// able tx involved, so the "no gaps" invariant on Append stays
+	// intact). Every column listed below IS part of the canonical hash
+	// input, so a tamperer cannot rewrite history through the s3_etag
+	// loophole — the hash chain still breaks on the next Verify().
+	if err := l.ensureNoUpdateTrigger(); err != nil {
+		return fmt.Errorf("audit: migrate trigger: %w", err)
+	}
+	if _, err := l.db.Exec(`CREATE TRIGGER IF NOT EXISTS audit_log_no_delete
+		BEFORE DELETE ON audit_log
+		BEGIN SELECT RAISE(ABORT, 'audit_log is append-only (WORM)'); END`); err != nil {
+		return fmt.Errorf("audit: migrate: %w", err)
 	}
 	// Backfill prev_hash/hash columns on pre-existing rows from earlier
 	// scaffolds. Safe no-op on a fresh table.
@@ -127,6 +156,79 @@ func (l *Log) migrate() error {
 		return fmt.Errorf("audit: backfill: %w", err)
 	}
 	return nil
+}
+
+// noUpdateTriggerSQL is the canonical definition of the BEFORE-UPDATE
+// guard. Kept in one place so backfillChain's drop/re-create cycle
+// installs the exact same shape migrate() installs on fresh tables.
+// The column list deliberately excludes id (autoincrement, never
+// user-set) and s3_etag (post-write metadata, see migrate() comment).
+const noUpdateTriggerSQL = `CREATE TRIGGER audit_log_no_update
+	BEFORE UPDATE OF tenant_id, user_id, action, target, ts, ip, user_agent, prev_hash, hash
+	ON audit_log
+	BEGIN SELECT RAISE(ABORT, 'audit_log is append-only (WORM)'); END`
+
+// ensureNoUpdateTrigger creates the BEFORE-UPDATE guard idempotently.
+// Older deployments installed a trigger with no column filter (it
+// fired on any column, including s3_etag — which would block #53's
+// Append→Put→UPDATE flow). We detect that variant by inspecting
+// sqlite_master.sql and replace it; matching triggers are left alone.
+func (l *Log) ensureNoUpdateTrigger() error {
+	var existing sql.NullString
+	err := l.db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type='trigger' AND name='audit_log_no_update'`).
+		Scan(&existing)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// Fresh table — create the column-scoped trigger.
+		_, err := l.db.Exec(noUpdateTriggerSQL)
+		return err
+	case err != nil:
+		return err
+	}
+	// Existing trigger covers s3_etag if it doesn't have an `OF` clause.
+	// Replace it in that case; otherwise leave it.
+	if !strings.Contains(strings.ToUpper(existing.String), "BEFORE UPDATE OF") {
+		if _, err := l.db.Exec(`DROP TRIGGER audit_log_no_update`); err != nil {
+			return err
+		}
+		if _, err := l.db.Exec(noUpdateTriggerSQL); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureColumnTEXT issues `ALTER TABLE … ADD COLUMN … TEXT` exactly
+// when the named column is absent, by probing PRAGMA table_info. SQLite
+// has no `IF NOT EXISTS` on ADD COLUMN; this is the standard idiom.
+func (l *Log) ensureColumnTEXT(table, col string) error {
+	rows, err := l.db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			ctype   string
+			notnull int
+			dflt    sql.NullString
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == col {
+			return rows.Close()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = l.db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s TEXT`, table, col))
+	return err
 }
 
 func (l *Log) backfillChain() error {
@@ -159,17 +261,17 @@ func (l *Log) backfillChain() error {
 	if err != nil {
 		return err
 	}
-	// UPDATEs would trip the no-update trigger. Backfill happens via
-	// the sqlite_master raw path: drop the trigger, write, re-create.
-	// We only run this on rows that have no hash, so the WORM contract
-	// is preserved for hashed rows.
+	// UPDATEs to hash-covered columns would trip the no-update trigger.
+	// Backfill happens via the sqlite_master raw path: drop the trigger,
+	// write, re-create. We only run this on rows that have no hash, so
+	// the WORM contract is preserved for hashed rows. The re-creation
+	// uses noUpdateTriggerSQL so the column-scoped shape (which excludes
+	// s3_etag) is the only shape that ever lands in production.
 	if _, err := l.db.Exec(`DROP TRIGGER IF EXISTS audit_log_no_update`); err != nil {
 		return err
 	}
 	defer func() {
-		_, _ = l.db.Exec(`CREATE TRIGGER IF NOT EXISTS audit_log_no_update
-			BEFORE UPDATE ON audit_log
-			BEGIN SELECT RAISE(ABORT, 'audit_log is append-only (WORM)'); END`)
+		_, _ = l.db.Exec(noUpdateTriggerSQL)
 	}()
 	for _, p := range todo {
 		p.e.PrevHash = prev
@@ -272,9 +374,30 @@ func (l *Log) Append(ctx context.Context, e Entry) error {
 	// Stream to WORM cold store. Failure here is recorded but does
 	// not undo the SQLite write — the hot log is the immediate truth;
 	// the operator backfills cold from hot if the streamer was down.
+	//
+	// On success, capture the cold-tier ETag returned by PutEntry and
+	// record it on audit_log.s3_etag via a follow-up UPDATE (not wrapped
+	// in a transaction — see the long invariant doc above; the autoinc
+	// id is already reserved by the INSERT above so an UPDATE here
+	// cannot leak ids). If PutEntry returned an empty ETag (legal — the
+	// streamer just didn't surface one), we skip the UPDATE; tamperdetect
+	// treats NULL/empty as "fall back to full-body GET" so this row is
+	// just-as-safe, only-as-cheap-as-it-was-before-#53.
+	//
+	// If PutEntry FAILS, we surface the error and leave s3_etag = NULL —
+	// the row is already INSERTed (the SQLite truth is the immediate
+	// source of truth, per the existing contract), and tamperdetect's
+	// fallback handles legacy NULL rows correctly.
 	if l.streamer != nil {
-		if err := l.streamer.PutEntry(ctx, e, canonical); err != nil {
+		etag, err := l.streamer.PutEntry(ctx, e, canonical)
+		if err != nil {
 			return fmt.Errorf("audit: stream: %w", err)
+		}
+		if etag != "" && e.ID > 0 {
+			if _, err := l.db.ExecContext(ctx,
+				`UPDATE audit_log SET s3_etag = ? WHERE id = ?`, etag, e.ID); err != nil {
+				return fmt.Errorf("audit: persist etag: %w", err)
+			}
 		}
 	}
 	return nil

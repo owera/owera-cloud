@@ -181,6 +181,109 @@ func TestAppend_StreamFailureSurfaced(t *testing.T) {
 
 type alwaysFail struct{}
 
-func (alwaysFail) PutEntry(_ context.Context, _ Entry, _ []byte) error {
-	return errors.ErrUnsupported
+func (alwaysFail) PutEntry(_ context.Context, _ Entry, _ []byte) (string, error) {
+	return "", errors.ErrUnsupported
+}
+
+// fakeEtagStreamer is a minimal WORMStreamer that returns a stable
+// canned ETag so the test can assert Append populated audit_log.s3_etag.
+type fakeEtagStreamer struct {
+	etag string
+}
+
+func (f *fakeEtagStreamer) PutEntry(_ context.Context, _ Entry, _ []byte) (string, error) {
+	return f.etag, nil
+}
+
+// TestAppend_PersistsEtagFromStreamer is the #53 acceptance check.
+// Append must record the streamer's returned ETag on audit_log.s3_etag
+// so the tamperdetect cron can take the HEAD-based integrity path on
+// the next pass. An empty ETag is legal (we don't error); a non-empty
+// ETag MUST be persisted.
+func TestAppend_PersistsEtagFromStreamer(t *testing.T) {
+	streamer := &fakeEtagStreamer{etag: "deadbeef-mock-etag"}
+	l := newTestLog(t, WithStreamer(streamer))
+	ctx := context.Background()
+
+	if err := l.Append(ctx, Entry{
+		TenantID: "fixture-a", Action: "job.submit", Target: "fixture-job",
+		IP: "127.0.0.1", UserAgent: "t",
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	var got sql.NullString
+	if err := l.db.QueryRowContext(ctx,
+		`SELECT s3_etag FROM audit_log ORDER BY id DESC LIMIT 1`).Scan(&got); err != nil {
+		t.Fatalf("select s3_etag: %v", err)
+	}
+	if !got.Valid || got.String != "deadbeef-mock-etag" {
+		t.Fatalf("s3_etag: got valid=%v value=%q want valid=true value=%q",
+			got.Valid, got.String, "deadbeef-mock-etag")
+	}
+}
+
+// TestAppend_EmptyEtagLeavesNull confirms the "streamer cannot surface
+// an ETag" path: Append must not error and must leave s3_etag NULL so
+// tamperdetect's legacy fallback runs.
+func TestAppend_EmptyEtagLeavesNull(t *testing.T) {
+	streamer := &fakeEtagStreamer{etag: ""}
+	l := newTestLog(t, WithStreamer(streamer))
+	ctx := context.Background()
+
+	if err := l.Append(ctx, Entry{
+		TenantID: "fixture-a", Action: "job.submit", Target: "fixture-job",
+		IP: "127.0.0.1", UserAgent: "t",
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	var got sql.NullString
+	if err := l.db.QueryRowContext(ctx,
+		`SELECT s3_etag FROM audit_log ORDER BY id DESC LIMIT 1`).Scan(&got); err != nil {
+		t.Fatalf("select s3_etag: %v", err)
+	}
+	if got.Valid {
+		t.Fatalf("s3_etag: got valid=true value=%q; want NULL", got.String)
+	}
+}
+
+// TestMigrate_IsIdempotent runs New twice on the same db handle to
+// confirm the s3_etag column + trigger replacement are run-twice safe.
+// A second New() call must not error.
+func TestMigrate_IsIdempotent(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := New(db); err != nil {
+		t.Fatalf("New (first): %v", err)
+	}
+	if _, err := New(db); err != nil {
+		t.Fatalf("New (second, idempotency check): %v", err)
+	}
+	// Sanity: the column actually exists.
+	rows, err := db.Query(`PRAGMA table_info(audit_log)`)
+	if err != nil {
+		t.Fatalf("PRAGMA: %v", err)
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var (
+			cid              int
+			name, ctype      string
+			notnull, pk      int
+			dflt             sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if name == "s3_etag" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected audit_log.s3_etag column after migrate()")
+	}
 }
