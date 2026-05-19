@@ -271,10 +271,10 @@ func TestMigrate_IsIdempotent(t *testing.T) {
 	found := false
 	for rows.Next() {
 		var (
-			cid              int
-			name, ctype      string
-			notnull, pk      int
-			dflt             sql.NullString
+			cid         int
+			name, ctype string
+			notnull, pk int
+			dflt        sql.NullString
 		)
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
 			t.Fatalf("scan: %v", err)
