@@ -5,8 +5,11 @@ import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { JobStatusBadge } from "@/components/job-status-badge";
 import { JobTimeline } from "@/components/job-timeline";
+import { ShippingTracker } from "@/components/compose/shipping-tracker";
+import { ValueReceipt } from "@/components/compose/value-receipt";
 import { api, ApiClientError } from "@/lib/api-client";
 import { duration, formatCents, shortTimestamp } from "@/lib/format";
+import { getJobBlueprint } from "@/lib/compose/catalog";
 import type { Job, JobLedgerEntry } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -80,13 +83,19 @@ async function safeFetch(id: string): Promise<{
 
 interface PageProps {
   params: Promise<{ id: string }>;
+  searchParams?: Promise<{ job?: string; from?: string }>;
 }
 
-export default async function JobDetailPage({ params }: PageProps) {
+export default async function JobDetailPage({ params, searchParams }: PageProps) {
   const { id } = await params;
+  const sp = (await searchParams) ?? {};
   const { job, ledger, live } = await safeFetch(id);
 
-  const rerunHref = `/compose?sku=${encodeURIComponent(job.skuSlug)}&prompt=${encodeURIComponent(job.inputSummary)}`;
+  const blueprint = sp.job ? getJobBlueprint(sp.job) : undefined;
+  const rerunHref = blueprint
+    ? `/compose/build?job=${encodeURIComponent(blueprint.id)}`
+    : `/compose?sku=${encodeURIComponent(job.skuSlug)}&prompt=${encodeURIComponent(job.inputSummary)}`;
+  const running = job.state === "running" || job.state === "queued";
   // Tool calls in the ledger are the "what the agent did" — pull them out
   // for a dedicated Plan panel so a user can scan the work at a glance.
   const planSteps = ledger.filter(
@@ -136,6 +145,32 @@ export default async function JobDetailPage({ params }: PageProps) {
         <Button asChild variant="ghost" size="sm">
           <Link href={`${rerunHref}&schedule=1`}>Schedule…</Link>
         </Button>
+      </section>
+
+      {/* Shipping tracker — the at-a-glance "where is my deep agent?" view. */}
+      {blueprint && (
+        <section className="border border-[var(--color-rule)] rounded-sm bg-[rgba(0,0,0,0.2)] px-5 py-4 flex flex-col gap-1">
+          <span className="readout-label">HIRED</span>
+          <h2
+            className="text-xl leading-tight"
+            style={{ fontFamily: "var(--font-display)" }}
+          >
+            {blueprint.name}.
+          </h2>
+          <span
+            className="italic text-sm text-[var(--color-ink-dim)]"
+            style={{ fontFamily: "var(--font-display)" }}
+          >
+            {blueprint.tagline} ·{" "}
+            <span className="text-[var(--color-ink-dim)]">
+              Charged {blueprint.billingUnit}.
+            </span>
+          </span>
+        </section>
+      )}
+
+      <section className="border border-[var(--color-rule)] rounded-sm bg-[rgba(0,0,0,0.18)] px-5 py-4">
+        <ShippingTracker ledger={ledger} running={running} />
       </section>
 
       <section className="grid grid-cols-4 gap-3">
@@ -225,6 +260,14 @@ export default async function JobDetailPage({ params }: PageProps) {
           <JobTimeline jobId={job.id} initial={ledger} live={live} />
         </CardBody>
       </Card>
+
+      {/* Value receipt — the BILLING ARTIFACT. Operator accept/reject per item. */}
+      <ValueReceipt
+        job={job}
+        ledger={ledger}
+        jobBlueprintId={blueprint?.id}
+        billingUnit={blueprint?.billingUnit}
+      />
 
       <Card>
         <CardHeader>

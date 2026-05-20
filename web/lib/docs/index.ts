@@ -25,13 +25,22 @@ export const DOCS: ReadonlyArray<DocEntry> = [
     order: 1,
   },
   {
+    slug: "concepts/job-library",
+    href: "/docs/concepts/job-library",
+    title: "The job library",
+    summary:
+      "100 hireable jobs across 10 business functions. Browse, edit five slots, hire by the accepted result.",
+    section: "Concepts",
+    order: 0,
+  },
+  {
     slug: "concepts/anatomy-of-a-job",
     href: "/docs/concepts/anatomy-of-a-job",
     title: "Anatomy of a job",
     summary:
       "The five attributes of every Owera job: outcome, recipe, cadence, delivery, identity. How the composer maps to each.",
     section: "Concepts",
-    order: 0,
+    order: 1,
   },
   {
     slug: "concepts/complexity-slider",

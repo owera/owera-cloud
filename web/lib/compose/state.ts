@@ -18,6 +18,7 @@ import {
   archetypeInitialInputs,
   getArchetype,
 } from "./archetypes";
+import { type JobBlueprint, getJobBlueprint } from "./catalog";
 import {
   type Delivery,
   type DeliveryKind,
@@ -53,6 +54,8 @@ export interface ComposeBudget {
 export type ArchetypeInputs = Record<string, string | string[] | boolean>;
 
 export interface ComposeState {
+  /** v3: the catalog job id this composition was seeded from (if any). */
+  jobId?: string;
   /** Outcome — the kind of job we are composing. */
   archetype: ArchetypeId;
   /** Structured inputs for the chosen archetype (per field key). */
@@ -170,6 +173,33 @@ export function resolvePrompt(state: ComposeState): string {
   return lines.join("\n\n").trim();
 }
 
+/** Pick the v2 archetype that best matches a catalog blueprint's action verb.
+ *  v2 archetypes are kept as the "shape" layer that drives the wizard fields;
+ *  the catalog is the "outcome" layer the user actually browses. */
+function blueprintToArchetype(b: JobBlueprint): ArchetypeId {
+  switch (b.action.verb) {
+    case "research":
+    case "cluster":
+    case "summarize":
+      return "research";
+    case "classify":
+    case "monitor":
+      // Watch and triage diverge on whether output goes to a person or a queue.
+      if (b.output.kind === "alert" || b.output.kind === "slack") return "watch";
+      return "triage";
+    case "draft":
+      // Briefs go out on cadence; everything else is custom/research.
+      if (b.trigger.kind === "schedule") return "brief";
+      return "research";
+    case "send":
+    case "coordinate":
+    case "update":
+    case "reconcile":
+    case "escalate":
+      return "custom";
+  }
+}
+
 /** Synthesize a short job name from inputs when the user hasn't supplied one. */
 export function resolveJobName(state: ComposeState): string {
   if (state.name && state.name.trim()) return state.name.trim();
@@ -196,6 +226,31 @@ export function parseFromSearchParams(
     if (Array.isArray(raw)) return raw[0];
     return raw;
   };
+
+  // v3: prefer the catalog blueprint if `?job=<id>` is present. The
+  // blueprint owns trigger/sources/action/output/approval/memory defaults.
+  // The wizard fields stay populated via the archetype that maps to the
+  // job's underlying recipe, so step 2 still has structured inputs to show.
+  const jobIdParam = get("job");
+  if (jobIdParam) {
+    const blueprint = getJobBlueprint(jobIdParam);
+    if (blueprint) {
+      const archetype: ArchetypeId = blueprintToArchetype(blueprint);
+      const seeded = defaultsForArchetype(archetype);
+      seeded.jobId = blueprint.id;
+      // Seed the primary-prompt field with the blueprint's hero prompt so
+      // step 2 has real text immediately.
+      const archeDef = getArchetype(archetype);
+      const primaryField = archeDef.fields.find((f) => f.isPrimaryPrompt);
+      if (primaryField) seeded.inputs[primaryField.key] = blueprint.heroPrompt;
+      seeded.prompt = blueprint.heroPrompt;
+      seeded.name = blueprint.name;
+      // Apply level overrides from URL if present.
+      const rawLevel = get("level");
+      if (isComplexityLevel(rawLevel)) seeded.level = rawLevel;
+      return seeded;
+    }
+  }
 
   const rawArche = get("archetype");
   const archetype: ArchetypeId = isArchetypeId(rawArche) ? rawArche : "custom";
