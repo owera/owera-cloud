@@ -48,14 +48,37 @@ class MockAuthProvider implements AuthProvider {
 }
 
 // ClerkAuthProvider is loaded lazily so the mock path (and any build that
-// never installs @clerk/nextjs) keeps working. The import is wrapped in a
-// try/catch because in tests + linters @clerk/nextjs may not be installed.
+// never installs @clerk/nextjs) keeps working.
+//
+// The Clerk import is wrapped in `loadClerkServer()` rather than a static
+// `import` or even `await import("...")` for a non-obvious reason:
+// `@clerk/nextjs/server` declares `server-only` at its top. Webpack will pull
+// that module into the client bundle if it appears in the static module graph
+// — even behind `if (isServer())` or `await import(...)` — because it still
+// creates a tracked chunk. We use `Function("return import(...)")` so webpack
+// cannot statically resolve the specifier; Node resolves it at runtime, and
+// we only call this from server-side branches, so the client bundle stays
+// clean. Without this trick, anything that touches lib/api-client (which
+// imports lib/auth) from a client component breaks the build with
+// "'server-only' cannot be imported from a Client Component module".
+type ClerkServer = typeof import("@clerk/nextjs/server");
+async function loadClerkServer(): Promise<ClerkServer | null> {
+  if (typeof window !== "undefined") return null;
+  try {
+    const mod = (await (
+      new Function("return import('@clerk/nextjs/server')")()
+    )) as ClerkServer;
+    return mod;
+  } catch {
+    return null;
+  }
+}
+
 class ClerkAuthProvider implements AuthProvider {
   async getCurrentUser(): Promise<User | null> {
     try {
-      // Dynamic import: lets the bundle build even when @clerk/nextjs is
-      // absent. The fallback is engaged by the factory if the import fails.
-      const mod = await import("@clerk/nextjs/server");
+      const mod = await loadClerkServer();
+      if (!mod) return null;
       const { userId, sessionClaims } = await mod.auth();
       if (!userId) return null;
       const claims = (sessionClaims ?? {}) as Record<string, unknown>;
@@ -91,7 +114,8 @@ class ClerkAuthProvider implements AuthProvider {
     // Node; here we ask Clerk for a JWT minted under the Owera template
     // which the API recognises (NextAuth bridge — WS-14 wires the verifier).
     try {
-      const mod = await import("@clerk/nextjs/server");
+      const mod = await loadClerkServer();
+      if (!mod) return null;
       const session = await mod.auth();
       if (!session.userId) return null;
       const tokenFn = (session as { getToken?: (opts?: { template?: string }) => Promise<string | null> })

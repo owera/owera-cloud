@@ -1,11 +1,17 @@
 import * as React from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { JobStatusBadge } from "@/components/job-status-badge";
 import { JobTimeline } from "@/components/job-timeline";
+import { ShippingTracker } from "@/components/compose/shipping-tracker";
+import { ValueReceipt } from "@/components/compose/value-receipt";
+import { Cockpit } from "@/components/exec/cockpit";
+import { buildRunStateFromLedger } from "@/lib/exec/run-state";
 import { api, ApiClientError } from "@/lib/api-client";
 import { duration, formatCents, shortTimestamp } from "@/lib/format";
+import { getJobBlueprint } from "@/lib/compose/catalog";
 import type { Job, JobLedgerEntry } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -79,11 +85,24 @@ async function safeFetch(id: string): Promise<{
 
 interface PageProps {
   params: Promise<{ id: string }>;
+  searchParams?: Promise<{ job?: string; from?: string }>;
 }
 
-export default async function JobDetailPage({ params }: PageProps) {
+export default async function JobDetailPage({ params, searchParams }: PageProps) {
   const { id } = await params;
+  const sp = (await searchParams) ?? {};
   const { job, ledger, live } = await safeFetch(id);
+
+  const blueprint = sp.job ? getJobBlueprint(sp.job) : undefined;
+  const rerunHref = blueprint
+    ? `/compose/build?job=${encodeURIComponent(blueprint.id)}`
+    : `/compose?sku=${encodeURIComponent(job.skuSlug)}&prompt=${encodeURIComponent(job.inputSummary)}`;
+  const running = job.state === "running" || job.state === "queued";
+  // Tool calls in the ledger are the "what the agent did" — pull them out
+  // for a dedicated Plan panel so a user can scan the work at a glance.
+  const planSteps = ledger.filter(
+    (e) => e.kind === "tool_call" || e.kind === "state_change",
+  );
 
   return (
     <div className="space-y-6">
@@ -108,6 +127,56 @@ export default async function JobDetailPage({ params }: PageProps) {
           )}
         </div>
       </header>
+
+      {/* Re-hire actions. The single most important muscle: turn one run into
+         many. */}
+      <section className="border border-[var(--color-rule)] rounded-sm bg-[rgba(0,0,0,0.2)] px-5 py-4 flex flex-wrap items-center gap-3">
+        <div className="flex flex-col gap-1 flex-1 min-w-[200px]">
+          <span className="readout-label">Re-hire this job</span>
+          <span className="text-xs text-[var(--color-ink-dim)]">
+            Run again with the same inputs, change something before re-running,
+            or schedule it to repeat.
+          </span>
+        </div>
+        <Button asChild variant="primary" size="sm">
+          <Link href={rerunHref}>Run again →</Link>
+        </Button>
+        <Button asChild variant="secondary" size="sm">
+          <Link href={`${rerunHref}&edit=1`}>Edit & re-hire</Link>
+        </Button>
+        <Button asChild variant="ghost" size="sm">
+          <Link href={`${rerunHref}&schedule=1`}>Schedule…</Link>
+        </Button>
+      </section>
+
+      {/* Shipping tracker — the at-a-glance "where is my deep agent?" view. */}
+      {blueprint && (
+        <section className="border border-[var(--color-rule)] rounded-sm bg-[rgba(0,0,0,0.2)] px-5 py-4 flex flex-col gap-1">
+          <span className="readout-label">HIRED</span>
+          <h2
+            className="text-xl leading-tight"
+            style={{ fontFamily: "var(--font-display)" }}
+          >
+            {blueprint.name}.
+          </h2>
+          <span
+            className="italic text-sm text-[var(--color-ink-dim)]"
+            style={{ fontFamily: "var(--font-display)" }}
+          >
+            {blueprint.tagline} ·{" "}
+            <span className="text-[var(--color-ink-dim)]">
+              Charged {blueprint.billingUnit}.
+            </span>
+          </span>
+        </section>
+      )}
+
+      {/* Cockpit — Now strip + Decision queue + Steps stream with edit-and-resume. */}
+      <Cockpit initial={buildRunStateFromLedger(job, ledger)} />
+
+      <section className="border border-[var(--color-rule)] rounded-sm bg-[rgba(0,0,0,0.18)] px-5 py-4">
+        <ShippingTracker ledger={ledger} running={running} />
+      </section>
 
       <section className="grid grid-cols-4 gap-3">
         <Meta label="SKU" value={job.skuSlug} />
@@ -147,12 +216,63 @@ export default async function JobDetailPage({ params }: PageProps) {
 
       <Card>
         <CardHeader>
+          <CardTitle>PLAN · WHAT THE AGENT IS DOING</CardTitle>
+        </CardHeader>
+        <CardBody>
+          {planSteps.length === 0 ? (
+            <p className="text-sm text-[var(--color-muted-foreground)]">
+              Plan steps will appear as the agent works. Each tool call and
+              state transition is recorded.
+            </p>
+          ) : (
+            <ol className="flex flex-col gap-2">
+              {planSteps.map((step, i) => (
+                <li
+                  key={step.id}
+                  className="flex items-start gap-3 text-sm font-mono"
+                >
+                  <span className="text-[var(--color-muted-foreground)] w-8 shrink-0">
+                    {String(i + 1).padStart(2, "0")}
+                  </span>
+                  <span
+                    className={[
+                      "px-1.5 rounded text-[10px] uppercase tracking-wider",
+                      step.kind === "tool_call"
+                        ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                        : "bg-[var(--color-muted)] text-[var(--color-muted-foreground)]",
+                    ].join(" ")}
+                  >
+                    {step.kind === "tool_call" ? "TOOL" : "STATE"}
+                  </span>
+                  <span className="flex-1 text-[var(--color-foreground)]">
+                    {step.message}
+                  </span>
+                  <span className="text-[10px] text-[var(--color-muted-foreground)]">
+                    {shortTimestamp(step.ts).split(" ").slice(-2).join(" ")}
+                  </span>
+                </li>
+              ))}
+            </ol>
+          )}
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>LEDGER</CardTitle>
         </CardHeader>
         <CardBody>
           <JobTimeline jobId={job.id} initial={ledger} live={live} />
         </CardBody>
       </Card>
+
+      {/* Value receipt — the BILLING ARTIFACT. Operator accept/reject per item. */}
+      <ValueReceipt
+        job={job}
+        ledger={ledger}
+        jobBlueprintId={blueprint?.id}
+        billingUnit={blueprint?.billingUnit}
+      />
 
       <Card>
         <CardHeader>

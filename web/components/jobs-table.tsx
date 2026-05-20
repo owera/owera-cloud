@@ -68,49 +68,62 @@ export function JobsTable({ jobs, compact = false }: JobsTableProps) {
           {!compact && <TH>DURATION</TH>}
           {header("costCents", "COST")}
           {!compact && <TH>NODES</TH>}
+          <TH className="text-right">ACTIONS</TH>
         </TR>
       </THead>
       <TBody>
         {sorted.length === 0 && (
           <TR>
             <TD
-              colSpan={compact ? 5 : 7}
+              colSpan={compact ? 6 : 8}
               className="text-center text-[var(--color-muted-foreground)] py-6"
             >
               No jobs yet.
             </TD>
           </TR>
         )}
-        {sorted.map((job) => (
-          <TR key={job.id}>
-            <TD>
-              <Link
-                href={`/jobs/${job.id}`}
-                className="text-[var(--color-primary)] hover:underline"
-              >
-                {job.id}
-              </Link>
-            </TD>
-            <TD>{job.skuSlug}</TD>
-            <TD>
-              <JobStatusBadge state={job.state} />
-            </TD>
-            <TD title={job.submittedAt}>{relativeTime(job.submittedAt)}</TD>
-            {!compact && (
+        {sorted.map((job) => {
+          const rerunHref = `/compose?sku=${encodeURIComponent(job.skuSlug)}&prompt=${encodeURIComponent(job.inputSummary)}`;
+          return (
+            <TR key={job.id}>
               <TD>
-                {job.startedAt
-                  ? duration(job.startedAt, job.finishedAt)
-                  : "—"}
+                <Link
+                  href={`/jobs/${job.id}`}
+                  className="text-[var(--color-primary)] hover:underline"
+                >
+                  {job.id}
+                </Link>
               </TD>
-            )}
-            <TD>{formatCents(job.costCents)}</TD>
-            {!compact && (
-              <TD className="text-[var(--color-muted-foreground)]">
-                {job.assignedNodes.join(", ") || "—"}
+              <TD>{job.skuSlug}</TD>
+              <TD>
+                <JobStatusBadge state={job.state} />
               </TD>
-            )}
-          </TR>
-        ))}
+              <TD title={job.submittedAt}>{relativeTime(job.submittedAt)}</TD>
+              {!compact && (
+                <TD>
+                  {job.startedAt
+                    ? duration(job.startedAt, job.finishedAt)
+                    : "—"}
+                </TD>
+              )}
+              <TD>{formatCents(job.costCents)}</TD>
+              {!compact && (
+                <TD className="text-[var(--color-muted-foreground)]">
+                  {job.assignedNodes.join(", ") || "—"}
+                </TD>
+              )}
+              <TD className="text-right">
+                <Link
+                  href={rerunHref}
+                  className="text-[10px] font-mono uppercase tracking-wider text-[var(--color-primary)] hover:underline"
+                  title="Open this job in the composer to re-hire it"
+                >
+                  Run again →
+                </Link>
+              </TD>
+            </TR>
+          );
+        })}
       </TBody>
     </Table>
   );
