@@ -7,6 +7,8 @@ import { JobStatusBadge } from "@/components/job-status-badge";
 import { JobTimeline } from "@/components/job-timeline";
 import { ShippingTracker } from "@/components/compose/shipping-tracker";
 import { ValueReceipt } from "@/components/compose/value-receipt";
+import { Cockpit } from "@/components/exec/cockpit";
+import { buildRunStateFromLedger } from "@/lib/exec/run-state";
 import { api, ApiClientError } from "@/lib/api-client";
 import { duration, formatCents, shortTimestamp } from "@/lib/format";
 import { getJobBlueprint } from "@/lib/compose/catalog";
@@ -168,6 +170,9 @@ export default async function JobDetailPage({ params, searchParams }: PageProps)
           </span>
         </section>
       )}
+
+      {/* Cockpit — Now strip + Decision queue + Steps stream with edit-and-resume. */}
+      <Cockpit initial={buildRunStateFromLedger(job, ledger)} />
 
       <section className="border border-[var(--color-rule)] rounded-sm bg-[rgba(0,0,0,0.18)] px-5 py-4">
         <ShippingTracker ledger={ledger} running={running} />
